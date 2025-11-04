@@ -1,0 +1,44 @@
+# --- Python environment ---
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Logs / Cache ---
+*.log
+*.sqlite3
+.cache/
+.pytest_cache/
+
+# --- Machine Learning / Data ---
+checkpoints/
+runs/
+weights/
+datasets/
+outputs/
+models/
+*.pt
+*.h5
+*.onnx
+*.tflite
+*.ckpt
+
+# --- Generated files ---
+*.csv
+*.json
+*.npy
+*.npz
+*.pkl
+
+# --- Web / Build ---
+node_modules/
+dist/
+build/
+.env
