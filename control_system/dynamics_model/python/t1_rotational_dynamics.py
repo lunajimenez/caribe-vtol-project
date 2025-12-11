@@ -6,3 +6,6 @@ Esto implica crear las ecuaciones que gobiernan cómo cambian las velocidades an
 La validación inicial consiste en verificar que pequeñas perturbaciones no causen divergencia del sistema.
 
 """
+
+
+
