@@ -10,4 +10,4 @@ Python implementation of the full dynamic model:
 - T8: Transition model
 - T9: Numerical stability checks
 
-Use this folder to develop modular, testable Python scripts.
+Folder to develop modular, testable Python scripts.

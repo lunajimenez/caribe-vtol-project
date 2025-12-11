@@ -5,5 +5,3 @@ Contains Simulink `.slx` files for:
 - Transition modeling
 - Control integration
 - Comparison against Python models
-
-Recommended for final controller integration and high-fidelity validation.

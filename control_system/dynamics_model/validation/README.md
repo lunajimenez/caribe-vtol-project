@@ -6,4 +6,4 @@ This folder stores:
 - Numerical error analysis
 - Simulation logs
 
-Use this section to ensure model correctness before control design.
+Section to ensure model correctness before control design.
