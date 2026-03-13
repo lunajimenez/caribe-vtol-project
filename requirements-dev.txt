@@ -1,0 +1,36 @@
+# =====================================================================
+# DEVELOPMENT & TESTING - OPTIONAL REQUIREMENTS
+# =====================================================================
+# Jupyter for interactive notebooks and testing
+jupyter==1.0.0
+notebook==7.0.0
+ipython==8.18.0
+
+# Testing & quality assurance
+pytest==7.4.0
+pytest-cov==4.1.0
+
+# Code formatting & linting
+black==23.10.0
+flake8==6.1.0
+pylint==3.0.0
+
+# Type checking
+mypy==1.6.0
+
+# Documentation
+sphinx==7.2.0
+sphinx-rtd-theme==1.3.0
+
+# Version control utilities
+GitPython==3.1.45
+
+# Interactive visualization (for development)
+pyqtgraph==0.13.7
+pyvista==0.46.4
+
+# All core scientific packages
+numpy==1.26.4
+scipy==1.16.3
+pandas==2.3.3
+matplotlib==3.10.7

@@ -1,0 +1,25 @@
+# =====================================================================
+# CONTROL SYSTEMS & DYNAMICS - SPECIALIZED REQUIREMENTS
+# =====================================================================
+# Core dynamics and control
+numpy==1.26.4
+scipy==1.16.3
+sympy==1.14.0
+pandas==2.3.3
+statsmodels==0.14.5
+
+# Serial communication (Pixhawk, Ardupilot)
+pyserial==3.5
+
+# Data handling & storage
+h5py==3.15.1
+PyYAML==6.0.3
+
+# Visualization for control analysis
+matplotlib==3.10.7
+plotly==6.3.1
+
+# Utilities
+python-dateutil==2.9.0.post0
+tqdm==4.67.1
+joblib==1.5.2

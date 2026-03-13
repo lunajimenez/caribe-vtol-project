@@ -1,0 +1,35 @@
+# =====================================================================
+# AI & COMPUTER VISION - SPECIALIZED REQUIREMENTS
+# =====================================================================
+# Deep learning - PyTorch (Primary)
+torch==2.9.0
+torchvision==0.24.0
+torchaudio==2.9.0
+
+# Alternative: TensorFlow (uncomment if preferred)
+# tensorflow==2.18.0
+# keras==3.12.0
+
+# Vision & Detection models
+mediapipe==0.10.21
+ultralytics==8.3.224
+
+# Computer vision processing
+opencv-contrib-python==4.11.0.86
+scikit-image==0.25.2
+pillow==12.0.0
+
+# Scientific computing
+numpy==1.26.4
+scipy==1.16.3
+pandas==2.3.3
+
+# Visualization & analysis
+matplotlib==3.10.7
+plotly==6.3.1
+jupyter==1.0.0
+
+# Data utilities
+h5py==3.15.1
+tqdm==4.67.1
+joblib==1.5.2
