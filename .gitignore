@@ -1,5 +1,5 @@
 # --- Python environment ---
-venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -42,3 +42,7 @@ node_modules/
 dist/
 build/
 .env
+
+# Some scripts:
+activate.bat
+activate-venv.ps1
