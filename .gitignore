@@ -48,7 +48,5 @@ activate.bat
 activate-venv.ps1
 
 # Ignoring compiled Python files in the aerodynamic_analysis directory
-aerodynamic_analysis/dynamics_6dof.cpython-312.pyc
-aerodynamic_analysis/forces_moments.cpython-312.pyc
-aerodynamic_analysis/parameters.cpython-312.pyc
-aerodynamic_analysis/stability_analysis.cpython-312.pyc
+aerodynamic_analysis/_pycache__/
+aerodynamic_analysis/*.pyc

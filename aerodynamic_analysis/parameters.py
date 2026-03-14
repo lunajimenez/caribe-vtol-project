@@ -1,6 +1,6 @@
 """
 ================================================================================
-PARÁMETROS DEL VTOL CUADPLANO CARIBE
+PARÁMETROS DEL VTOL QUADPLANE
 ================================================================================
 Basado en: "Construcción de un prototipo de VTOL eléctrico para el transporte 
 de suministros médicos en zonas de difícil acceso del Caribe Colombiano"
@@ -13,6 +13,8 @@ Sistema de referencia:
 
 ================================================================================
 """
+
+# CG por delante del centro de presión
 
 import numpy as np
 from dataclasses import dataclass, field
