@@ -2,6 +2,7 @@
 # VTOL PROTOTYPE DEVELOPMENT - WINDOWS-OPTIMIZED REQUIREMENTS
 # =====================================================================
 # Core scientific computing & control systems
+
 numpy==1.26.4
 scipy==1.16.3
 pandas==2.3.3
