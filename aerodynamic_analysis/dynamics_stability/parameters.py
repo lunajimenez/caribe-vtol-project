@@ -350,3 +350,4 @@ if __name__ == "__main__":
     # Test: crear parámetros y validar
     params = get_default_vtol_parameters()
     print("✓ Parámetros cargados exitosamente")
+
