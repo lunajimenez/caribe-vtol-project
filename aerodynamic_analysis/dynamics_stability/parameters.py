@@ -1,353 +1,389 @@
 """
 ================================================================================
-PARÁMETROS DEL VTOL QUADPLANE
+PARÁMETROS CONSOLIDADOS DEL VTOL QUADPLANE (4+1 PUSHER, H-TAIL)
 ================================================================================
-Basado en: "Construcción de un prototipo de VTOL eléctrico para el transporte 
-de suministros médicos en zonas de difícil acceso del Caribe Colombiano"
-Tercera Iteración del Proyecto de Ingeniería - Nov 7, 2025
+Proyecto: VTOL eléctrico para transporte de suministros médicos
+          Caribe Colombiano - Universidad Tecnológica de Bolívar
+Configuración: QuadPlane 4+1 pusher, twin-boom H-tail, NACA 4412 wing
 
 Sistema de referencia:
-- Body Frame (BF): Origen en CG, +X adelante (pusher), +Y ala derecha, +Z abajo
-- Earth Frame (EF): NED (North-East-Down)
-- Stability Frame: Similar a Body pero con α alineado con velocidad
+  Body Frame (BF): Origen en CG, +X adelante, +Y ala derecha, +Z abajo
+  Earth Frame: NED (North-East-Down)
 
+Etiquetas de confianza:
+  [CONFIRMED] — valor tomado directamente de datos XFLR5 o medición física
+  [DERIVED]   — calculado de valores CONFIRMED mediante fórmula documentada
+  [PROVISIONAL] — estimado; fuente documentada en el comentario
+
+Referencia: Corda (2017) Ch.6; Sadraey (2012) Ch.6; Nelson (1998)
 ================================================================================
 """
 
-# CG por delante del centro de presión
-
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, Tuple
+
 
 # ============================================================================
-# 1. PARÁMETROS GEOMÉTRICOS & MÁSICOS
+# ATMÓSFERA Y CONDICIONES DE VUELO
 # ============================================================================
 
 @dataclass
-class AircraftGeometry:
-    """Geometría del VTOL quad-plano basada en sizing."""
-    
-    # Masa
-    mtow: float = 8.65  # kg, peso máximo al despegue (sizing)
-    payload_mass: float = 1.5  # kg
-    structural_mass: float = 3.5  # kg estimado
-    battery_mass: float = 2.0  # kg (estimado, configurable)
-    avionics_mass: float = 0.65  # kg (FC, sensores, etc.)
-    
-    # Alas
-    wing_area: float = 0.528  # m², superficie alar (S)
-    wing_span: float = 2.2  # m, envergadura (b)
-    wing_chord_mean: float = 0.28  # m, cuerda media aerodinámica (c̄)
-    aspect_ratio: float = 9.17  # AR = b²/S
-    taper_ratio: float = 0.607  # λ = c_tip/c_root
-    dihedral_angle: float = 0.0  # rad, ángulo diedro (neutral para este diseño)
-    
-    # Superficies de control
-    aileron_area: float = 0.05  # m², área de alerones (estimado 10% de S)
-    aileron_max_deflection: float = np.radians(25)  # rad, deflexión máxima
-    
-    # Elevador (en estabilizador horizontal)
-    elevator_area: float = 0.08  # m², área de elevador (estimado)
-    elevator_max_deflection: float = np.radians(25)  # rad
-    horizontal_tail_area: float = 0.12  # m²
-    horizontal_tail_arm: float = 0.6  # m, brazo de momento (CG a CP tail)
-    
-    # Timón (en estabilizador vertical)
-    rudder_area: float = 0.06  # m²
-    rudder_max_deflection: float = np.radians(30)  # rad
-    vertical_tail_area: float = 0.10  # m²
-    vertical_tail_arm: float = 0.6  # m
-    
-    # Motores
-    num_vertical_motors: int = 4  # Rotor configuration: X (quad)
-    rotor_config: str = "X"  # "X" o "+" (X = diagonal)
-    vertical_motor_arm: float = 0.25  # m, brazo de momento desde CG
-    
-    horizontal_motor_type: str = "pusher"  # "tractor" o "pusher"
-    horizontal_motor_thrust_max: float = 9.81 * 0.5 * mtow  # N, T/W = 0.5
+class Atmosphere:
+    """ISA a nivel del mar (operación costera caribeña)."""
+    rho: float = 1.225      # [kg/m³] densidad ISA sea-level [CONFIRMED]
+    g:   float = 9.81       # [m/s²] gravedad estándar [CONFIRMED]
+    mu:  float = 1.789e-5   # [Pa·s] viscosidad dinámica ISA 15°C [CONFIRMED]
+    a:   float = 340.3      # [m/s] velocidad del sonido ISA [CONFIRMED]
 
+
+# ============================================================================
+# MASAS E INERCIAS
+# ============================================================================
 
 @dataclass
-class InertiaProperties:
-    """Momentos de inercia calculados según fórmulas empíricas."""
-    
-    # Se calculan automáticamente en __post_init__
-    mtow: float = 8.65  # kg
-    wing_span: float = 2.2  # m
-    wing_area: float = 0.528  # m²
-    wing_chord_mean: float = 0.28  # m
-    fuselage_length: float = 1.2  # m, estimado
-    fuselage_diameter: float = 0.12  # m, estimado
-    
-    # Momentos de inercia (se calculan)
-    Ixx: float = field(default=0.0)  # kg·m², inercia roll
-    Iyy: float = field(default=0.0)  # kg·m², inercia pitch
-    Izz: float = field(default=0.0)  # kg·m², inercia yaw
-    Ixz: float = field(default=0.0)  # kg·m², producto de inercia
-    
-    def __post_init__(self):
-        """Calcular momentos de inercia usando fórmulas de Roskam."""
-        # Basado en "Aircraft Design: A Conceptual Approach" (Raymer, 2012)
-        # y metodología de Roskam para UAVs pequeños
-        
-        m = self.mtow
-        b = self.wing_span
-        S = self.wing_area
-        c = self.wing_chord_mean
-        L_f = self.fuselage_length
-        d_f = self.fuselage_diameter
-        
-        # Aproximaciones empíricas para UAVs eléctricos de pequeña escala
-        # Basadas en correlaciones de Tyan et al. (2017)
-        
-        # Inercia de ROLL (eje X)
-        # Dominada por distribución de masa en envergadura
-        self.Ixx = 0.065 * m * (b/2)**2
-        
-        # Inercia de PITCH (eje Y)
-        # Dominada por fuselaje y distribución longitudinal
-        self.Iyy = 0.12 * m * (L_f/2)**2 + 0.015 * m * (c/2)**2
-        
-        # Inercia de YAW (eje Z)
-        # Suma de contribuciones laterales
-        self.Izz = 0.08 * m * (b/2)**2 + 0.10 * m * (L_f/2)**2
-        
-        # Producto de inercia (generalmente pequeño en diseños simétricos)
-        self.Ixz = 0.0  # Asumimos simetría lateral
+class MassProperties:
+    """Propiedades másicas del VTOL.
 
-
-@dataclass
-class AerodynamicCoefficients:
-    """Coeficientes aerodinámicos base y derivadas de estabilidad.
-    
-    Basados en:
-    - Bryan (1911): "Stability in Aviation"
-    - Abzug & Larrabee (2005): "Airplane Stability and Control"
-    - Xflr5 data para perfil NACA 4415 (referencia de proyecto)
+    Inercias marcadas [PROVISIONAL]: deben sustituirse con valores CAD NX
+    una vez se cierre el diseño detallado de la estructura.
     """
-    
-    # Drag polar básico (parabólico)
-    CD0: float = 0.04  # Coeficiente de arrastre parasitario (cruise trim)
-    oswald_efficiency: float = 0.976  # Factor de eficiencia de Oswald (e)
-    
-    # Coeficiente de sustentación en condición base
-    CL0: float = 0.3  # CL en α = 0° (línea de sustentación nula ~-2°)
-    CLalpha: float = 5.7  # dCL/dα [rad⁻¹], para NACA 4415 típico
-    CL_max: float = 2.2  # Sustentación máxima (con flaps/slots)
-    
-    # ========== DERIVADAS DE ESTABILIDAD LONGITUDINAL (pitch) ==========
-    # Ecuación: Cm = Cm0 + Cmα*α + Cmq*q̄ + Cmα̇*α̇ + Cmδe*δe
-    
-    Cm0: float = -0.05  # Momento de pitch en trim (neutral point design)
-    Cm_alpha: float = -1.2  # ∂Cm/∂α [rad⁻¹], debe ser negativo (estabilidad)
-    Cm_alphadot: float = -7.5  # ∂Cm/∂(α̇·c̄/2V), amortiguamiento
-    Cm_q: float = -25.0  # ∂Cm/∂(q·c̄/2V), amortiguamiento pitch (grande)
-    Cm_delta_e: float = -0.35  # ∂Cm/∂δ_e [rad⁻¹], control
-    
-    # ========== DERIVADAS LATERALES-DIRECCIONALES ==========
-    # Eje Y (lateral): CY = CY0 + CYβ*β + CYp*p̄ + CYr*r̄ + CYδa*δa + CYδr*δr
-    # Eje X (roll): Cl = Clβ*β + Clp*p̄ + Clr*r̄ + Clδa*δa + Clδr*δr
-    # Eje Z (yaw): Cn = Cnβ*β + Cnp*p̄ + Cnr*r̄ + Cnδa*δa + Cnδr*δr
-    
-    CY_beta: float = -0.75  # ∂CY/∂β, fuerza lateral por ángulo lateral (neg)
-    CY_delta_a: float = 0.0  # ∂CY/∂δ_a (pequeño en ala alta)
-    CY_delta_r: float = 0.15  # ∂CY/∂δ_r, control de timón
-    
-    Cl_beta: float = -0.12  # ∂Cl/∂β [rad⁻¹], estabilidad de diedro (NEGATIVO = estable)
-    Cl_p: float = -0.50  # ∂Cl/∂(p·b/2V), amortiguamiento roll (grande, negativo)
-    Cl_r: float = 0.15  # ∂Cl/∂(r·b/2V), acoplamiento yaw-roll (positivo)
-    Cl_delta_a: float = 0.20  # ∂Cl/∂δ_a [rad⁻¹], control de alerones
-    
-    Cn_beta: float = 0.15  # ∂Cn/∂β [rad⁻¹], estabilidad direccional (POSITIVO = estable)
-    Cn_p: float = -0.02  # ∂Cn/∂(p·b/2V), acoplamiento roll-yaw
-    Cn_r: float = -0.25  # ∂Cn/∂(r·b/2V), amortiguamiento yaw (NEGATIVO = amortiguado)
-    Cn_delta_a: float = 0.01  # ∂Cn/∂δ_a (pequeño)
-    Cn_delta_r: float = -0.10  # ∂Cn/∂δ_r [rad⁻¹], control
+    m:   float = 8.5    # [kg] MTOW [CONFIRMED — especificación de diseño]
+    x_cg: float = 0.41  # [m] posición CG desde el morro [CONFIRMED — sizing]
+
+    # Momentos de inercia [PROVISIONAL — estimados por fórmulas Roskam para UAVs]
+    # Fuente estimación: Tyan et al. (2017) UAV mass-inertia correlations
+    Ixx: float = 0.35   # [kg·m²] inercia de roll  [PROVISIONAL]
+    Iyy: float = 0.45   # [kg·m²] inercia de pitch [PROVISIONAL]
+    Izz: float = 0.70   # [kg·m²] inercia de yaw   [PROVISIONAL]
+    Ixz: float = 0.02   # [kg·m²] producto de inercia XZ [PROVISIONAL]
 
 
 # ============================================================================
-# 2. PARÁMETROS DE OPERACIÓN Y CONTROL
+# GEOMETRÍA DEL ALA
 # ============================================================================
 
 @dataclass
-class FlightConditions:
-    """Condiciones de vuelo nominal (caribe colombiano)."""
-    
-    # Altitud de operación (RAC 100)
-    altitude_agl_m: float = 120.0  # m AGL, máximo permitido
-    altitude_msl_m: float = 100.0  # m MSL (aprox, costa caribeña)
-    
-    # Atmósfera estándar ISA (20°C, humedad caribeña ~80%)
-    temperature_K: float = 293.15  # K (20°C)
-    pressure_Pa: float = 101325.0  # Pa (nivel del mar)
-    rho: float = 1.225  # kg/m³, densidad del aire ISA
-    g: float = 9.81  # m/s²
-    
-    # Velocidades de referencia
-    v_cruise_ms: float = 70 / 3.6  # m/s, 70 km/h (crucero)
-    v_stall_ms: float = 40 / 3.6  # m/s, 40 km/h (pérdida)
-    v_hover_ms: float = 0.0  # m/s, hover = estacionario
-    
-    # Vientos
-    wind_speed_ms: float = 0.0  # m/s, velocidad del viento
-    wind_direction_rad: float = 0.0  # rad
+class WingGeometry:
+    """Geometría alar — NACA 4412, ala recta sin flecha."""
+    S:        float = 0.567   # [m²] superficie alar [CONFIRMED — sizing final]
+    b:        float = 2.300   # [m]  envergadura [DERIVED: b = sqrt(AR·S) = sqrt(9.33·0.567)]
+    c_bar:    float = 0.252   # [m]  MAC (cuerda media aerodinámica) [CONFIRMED]
+    AR:       float = 9.33    # [-]  aspect ratio [CONFIRMED]
+    taper:    float = 1.0     # [-]  taper ratio (ala recta) [CONFIRMED — straight wing]
+    sweep:    float = 0.0     # [rad] flecha (sin flecha) [CONFIRMED]
+    dihedral: float = 0.0     # [rad] diedro [CONFIRMED — diseño plano]
+    iw:       float = 0.0     # [rad] incidencia del ala [CONFIRMED]
 
+    # Posición en el avión
+    x_LE:    float = 0.40     # [m] borde de ataque del ala desde el morro [PROVISIONAL — medir CAD]
+    x_ac:    float = 0.463    # [m] AC del ala desde morro = x_LE + 0.25·c_bar [DERIVED]
+
+    airfoil:  str  = "NACA4412"
+    Cm_ac_2D: float = -0.10   # [-] Cm perfil alrededor del AC (2D) [CONFIRMED — NACA 4412 ref]
+
+    def __post_init__(self):
+        self.x_ac = self.x_LE + 0.25 * self.c_bar  # [DERIVED]
+
+
+# ============================================================================
+# GEOMETRÍA COLA HORIZONTAL (H-tail: estabilizador único)
+# ============================================================================
+
+@dataclass
+class HTailGeometry:
+    """Cola horizontal — NACA 0012."""
+    c_t:  float = 0.16    # [m]  cuerda de la cola [CONFIRMED]
+    b_t:  float = 0.86    # [m]  envergadura de la cola [CONFIRMED]
+    S_t:  float = 0.1376  # [m²] superficie = c_t × b_t [DERIVED]
+    i_t:  float = np.radians(-2.0)  # [rad] incidencia de la cola (-2°) [CONFIRMED]
+    x_ac_t: float = 1.20  # [m]  AC de cola desde el morro [CONFIRMED]
+
+    # Elevator [PROVISIONAL — diseño preliminar]
+    ce_ct:  float = 0.35  # [-]  fracción cuerda elevador/cola [PROVISIONAL]
+    tau_e:  float = 0.45  # [-]  eficiencia del elevador (Schlichting) [PROVISIONAL]
+    de_max: float = np.radians(25.0)  # [rad] deflexión máx ±25° [PROVISIONAL]
+
+    eta_t:  float = 0.9   # [-]  eficiencia dinámica de la cola (q_t/q_inf) [PROVISIONAL]
+
+    def __post_init__(self):
+        self.S_t = self.c_t * self.b_t  # [DERIVED]
+
+
+# ============================================================================
+# GEOMETRÍA COLA VERTICAL (2 aletas — H-tail con booms)
+# ============================================================================
+
+@dataclass
+class VTailGeometry:
+    """Cola vertical — configuración H-tail: 2 aletas en extremos de cola horiz."""
+    n_fins: int   = 2      # [-]  número de aletas verticales [CONFIRMED — H-tail]
+
+    # Dimensiones por aleta [PROVISIONAL — medir de CAD NX]
+    c_v:   float = 0.16   # [m]  cuerda aleta vertical [PROVISIONAL]
+    h_v:   float = 0.20   # [m]  altura por aleta [PROVISIONAL]
+    S_v:   float = 0.064  # [m²] área total = 2 × c_v × h_v [DERIVED]
+
+    x_ac_v: float = 1.15  # [m]  AC de cola vertical desde morro [PROVISIONAL]
+    eta_v:  float = 0.9   # [-]  eficiencia dinámica cola vert [PROVISIONAL]
+
+    # Rudder [PROVISIONAL]
+    cr_cv:  float = 0.35  # [-]  fracción cuerda rudder/aleta [PROVISIONAL]
+    tau_r:  float = 0.40  # [-]  eficiencia del rudder [PROVISIONAL]
+    dr_max: float = np.radians(25.0)  # [rad] deflexión máx ±25° [PROVISIONAL]
+
+    def __post_init__(self):
+        self.S_v = self.n_fins * self.c_v * self.h_v  # [DERIVED]
+
+
+# ============================================================================
+# GEOMETRÍA DE ALERONES
+# ============================================================================
+
+@dataclass
+class AileronGeometry:
+    """Alerones — diseño preliminar."""
+    ca_c:   float = 0.25   # [-]  fracción cuerda alerón/ala [PROVISIONAL]
+    tau_a:  float = 0.45   # [-]  eficiencia del alerón [PROVISIONAL]
+    da_max: float = np.radians(25.0)  # [rad] deflexión máx ±25° [PROVISIONAL]
+    y_inner: float = 0.55  # [m]  inicio alerón desde plano simetría [PROVISIONAL]
+    y_outer: float = 1.05  # [m]  fin alerón desde plano simetría [PROVISIONAL]
+
+
+# ============================================================================
+# DERIVADAS AERODINÁMICAS — DATOS XFLR5 + DERIVADOS ANALÍTICOS
+# ============================================================================
+
+@dataclass
+class AeroDerivatives:
+    """Derivadas de estabilidad aerodinámicas.
+
+    Fuente primaria: XFLR5 v6.61, análisis tipo 'Plane', modelo 'Modelo alas'.
+    Regresión lineal en rango α = [-5°, +11°].
+
+    Fórmulas de derivadas de tasa: Corda (2017) §6.9; Nelson (1998) Ch.4
+    """
+
+    # ---- Ala (3D XFLR5 invíscido) ----
+    CLa_w:  float = 5.0596   # [/rad] dCL/dα del ala 3D [CONFIRMED — XFLR5 regresión]
+    CL0_w:  float = 0.3597   # [-]    CL del ala a α=0° [CONFIRMED — XFLR5]
+    CMa_w:  float = -1.839   # [/rad] dCm/dα del ala ref. origen XFLR5 [CONFIRMED]
+    CM0_w:  float = -0.2229  # [-]    Cm del ala a α=0° ref. origen XFLR5 [CONFIRMED]
+
+    # ---- Cola horizontal (3D XFLR5 invíscido) ----
+    CLa_t:  float = 4.3930   # [/rad] dCL/dα de la cola 3D [CONFIRMED — XFLR5]
+    CL0_t:  float = 0.0      # [-]    CL cola a α=0° (NACA 0012 simétrico) [CONFIRMED]
+    CMa_t:  float = -0.588   # [/rad] dCm/dα de la cola ref. origen XFLR5 [CONFIRMED]
+
+    # ---- Perfiles 2D (XFOIL, Re=70 000) ----
+    CLa_2D_wing: float = 6.109  # [/rad] pendiente perfil NACA 4412 2D [CONFIRMED — XFOIL]
+    CLa_2D_tail: float = 7.123  # [/rad] pendiente perfil NACA 0012 2D [CONFIRMED — XFOIL]
+
+    # ---- Parámetros derivados de geometría y XFLR5 ----
+    # Downwash: dε/dα = 2·CLa_w / (π·AR)  [Corda (2017) Eq. 6.78]
+    deps_da: float = 0.345   # [-]    gradiente de downwash [DERIVED]
+
+    # Coeficiente de volumen horizontal: VH = lt·St/(S·c̄)
+    VH:      float = 0.761   # [-]    tail volume coefficient [DERIVED]
+
+    # Arrastre parasitario (polar viscosa, velocidad = α cero sustentación)
+    CD0_cruise: float = 0.014   # [-]  CD0 a 19.34 m/s [DERIVED — polar XFLR5 viscosa]
+    CD0_stall:  float = 0.016   # [-]  CD0 a 11.11 m/s [DERIVED — polar XFLR5 viscosa]
+
+    # Eficiencia de Oswald (ajuste parabólico polar viscosa)
+    e_oswald: float = 0.78   # [-]    [DERIVED — ajuste cuadrático polar viscosa XFLR5]
+
+    # L/D máximo y CL óptimo
+    LD_max:   float = 29.6   # [-]    [DERIVED — polar viscosa 19.34 m/s]
+    CL_opt:   float = 0.54   # [-]    CL a L/D máximo [DERIVED]
+
+    # ---- Derivadas de tasa (pitch) — Corda (2017) Eq. 6.98–6.105 ----
+    # CLq = 2·CLa_t·η_t·VH
+    # Cmq = -2·CLa_t·η_t·VH·(lt/c̄)     ← pitch damping
+    # CLa_dot = 2·CLa_t·η_t·VH·(dε/dα)
+    # Cma_dot = -2·CLa_t·η_t·VH·(lt/c̄)·(dε/dα)
+    # Se calculan en __post_init__ usando parámetros de cola/ala
+
+    CLq:     float = field(default=0.0)   # [DERIVED — calculado en __post_init__]
+    Cmq:     float = field(default=0.0)   # [DERIVED — calculado en __post_init__]
+    CLa_dot: float = field(default=0.0)   # [DERIVED — calculado en __post_init__]
+    Cma_dot: float = field(default=0.0)   # [DERIVED — calculado en __post_init__]
+
+    # ---- Derivadas laterales-direccionales ----
+    # Calculadas analíticamente; ver stability_analysis.py para detalle
+    CYb:   float = -0.42   # [/rad] ∂CY/∂β — fuerza lateral por sideslip [DERIVED]
+    Cnb:   float = 0.065   # [/rad] ∂Cn/∂β — weathercock stability (>0 estable) [DERIVED]
+    Clb:   float = -0.045  # [/rad] ∂Cl/∂β — diedro effect (<0 estable) [PROVISIONAL]
+    Clp:   float = -0.48   # [/rad] ∂Cl/∂p̂ — roll damping (<0) [DERIVED]
+    Clr:   float = 0.135   # [/rad] ∂Cl/∂r̂ — roll due to yaw [DERIVED]
+    Cnp:   float = -0.067  # [/rad] ∂Cn/∂p̂ — yaw due to roll [DERIVED]
+    Cnr:   float = -0.052  # [/rad] ∂Cn/∂r̂ — yaw damping (<0) [DERIVED]
+
+    # ---- Derivadas de control ----
+    # Elevador: CLde = τ_e·CLa_t·η_t·(St/S); Cmde = -CLde·(lt/c̄)
+    CLde:  float = field(default=0.0)   # [DERIVED — calculado en __post_init__]
+    CMde:  float = field(default=0.0)   # [DERIVED — calculado en __post_init__]
+
+    # Alerones [PROVISIONAL — depende de diseño final de alerón]
+    Clda:  float = 0.148   # [/rad] ∂Cl/∂δ_a [PROVISIONAL]
+    Cnda:  float = -0.012  # [/rad] ∂Cn/∂δ_a adverse yaw [PROVISIONAL]
+
+    # Rudder [PROVISIONAL]
+    CYdr:  float = 0.095   # [/rad] ∂CY/∂δ_r [PROVISIONAL]
+    Cldr:  float = 0.020   # [/rad] ∂Cl/∂δ_r [PROVISIONAL]
+    Cndr:  float = -0.060  # [/rad] ∂Cn/∂δ_r [PROVISIONAL]
+
+    def __post_init__(self):
+        # Parámetros geométricos necesarios
+        lt   = 0.79    # [m] brazo de cola = x_ac_t - x_cg = 1.20 - 0.41 [DERIVED]
+        c_bar = 0.252  # [m] MAC
+        S    = 0.567   # [m²]
+        S_t  = 0.1376  # [m²]
+        eta_t = 0.9    # eficiencia dinámica cola
+
+        # Derivadas de tasa (Corda §6.9)
+        self.CLq     =  2.0 * self.CLa_t * eta_t * self.VH                          # [DERIVED]
+        self.Cmq     = -2.0 * self.CLa_t * eta_t * self.VH * (lt / c_bar)           # [DERIVED]
+        self.CLa_dot =  2.0 * self.CLa_t * eta_t * self.VH * self.deps_da           # [DERIVED]
+        self.Cma_dot = -2.0 * self.CLa_t * eta_t * self.VH * (lt / c_bar) * self.deps_da  # [DERIVED]
+
+        # Derivadas de control elevador (Corda Eq. 6.93)
+        tau_e = 0.45   # eficiencia elevador [PROVISIONAL]
+        self.CLde =  tau_e * self.CLa_t * eta_t * (S_t / S)                         # [DERIVED]
+        self.CMde = -self.CLde * (lt / c_bar)                                        # [DERIVED]
+
+        # Gradiente de downwash verificación
+        # dε/dα = 2·CLa_w/(π·AR) — Corda Eq. 6.78
+        AR = 9.33
+        deps_check = 2.0 * self.CLa_w / (np.pi * AR)
+        assert abs(deps_check - self.deps_da) < 0.01, (
+            f"Downwash check failed: {deps_check:.3f} vs {self.deps_da:.3f}"
+        )
+
+
+# ============================================================================
+# PROPULSIÓN
+# ============================================================================
 
 @dataclass
 class PropulsionSystem:
-    """Parámetros de propulsión eléctrica."""
-    
-    # Motores brushless verticales
-    vertical_motor_kv: float = 520  # RPM/Volt (SunnySky X3525 referencia)
-    vertical_motor_mass_kg: float = 0.098  # kg c/u
-    vertical_motor_max_rpm: float = 6240  # RPM @ 12V
-    vertical_motor_max_thrust_kg: float = 2.5  # kgf, empuje máximo @ max RPM
-    vertical_motor_num: int = 4
-    
-    # Hélices verticales
-    vertical_prop_diameter_inch: float = 10  # pulgadas (estimado)
-    vertical_prop_pitch_inch: float = 5.0  # pulgadas
-    
-    # Motor horizontal (pusher)
-    horizontal_motor_kv: float = 520
-    horizontal_motor_max_thrust_kg: float = 2.5
-    horizontal_motor_max_rpm: float = 6240
-    
-    # Hélice horizontal
-    horizontal_prop_diameter_inch: float = 10
-    horizontal_prop_pitch_inch: float = 5.0
-    
-    # ESCs y respuesta dinámica
-    esc_response_time_s: float = 0.05  # Tiempo de respuesta ESC (50 ms típico)
-    motor_time_constant_s: float = 0.1  # Constante de tiempo del motor
-    
-    # Baterías
-    battery_voltage_nominal: float = 22.2  # V, 6S LiPo (6 * 3.7V)
-    battery_capacity_mah: float = 10000  # mAh
-    battery_c_rating: float = 25  # Descarga máxima (25C)
-    battery_mass_kg: float = 2.0
-    battery_energy_wh: float = 222  # Wh (22.2V * 10Ah)
+    """Sistema de propulsión eléctrica.
 
+    Motor pusher: genera empuje en +X del body frame.
+    Rotores VTOL: generan empuje en -Z del body frame (hacia arriba).
+    """
+    # Motor horizontal pusher
+    T_max_pusher: float = 24.5   # [N] empuje máximo motor pusher [PROVISIONAL]
+    x_pusher:     float = 1.25   # [m] posición motor pusher desde morro [PROVISIONAL]
 
-@dataclass
-class VTOLModeParameters:
-    """Parámetros específicos para cada modo de vuelo."""
-    
-    # Transición: tiempo y dinámica
-    transition_time_max_s: float = 5.0  # Tiempo máximo transición
-    transition_pitch_rate_max_rad_s: float = np.radians(30)  # 30°/s máximo
-    
-    # Hover: control
-    hover_vertical_margin: float = 0.1  # Margen sobre W (10% extra de thrust)
-    hover_yaw_rate_max_rad_s: float = np.radians(60)  # 60°/s max yaw
-    
-    # Crucero: trim
-    cruise_pitch_trim_rad: float = np.radians(3)  # Pitch trim típico
-    cruise_bank_angle_max_rad: float = np.radians(30)  # 30° max bank
-    cruise_rate_of_climb_ms: float = 3.0  # 3 m/s ROC nominal
+    # Rotores VTOL (4 motores en configuración X)
+    n_rotors:     int   = 4
+    T_max_rotor:  float = 24.5   # [N] empuje máximo por rotor [PROVISIONAL]
+    arm_rotor:    float = 0.25   # [m] brazo desde CG a cada rotor [PROVISIONAL]
+
+    # Constante de tiempo del motor (dinámica primer orden)
+    tau_motor:    float = 0.10   # [s] [PROVISIONAL]
 
 
 # ============================================================================
-# 3. FUNCIÓN DE CONSTRUCCIÓN DE PARÁMETROS COMPLETOS
+# CONTENEDOR MAESTRO DE CONFIGURACIÓN
 # ============================================================================
 
 @dataclass
-class VTOLAircraftParameters:
-    """Contenedor maestro de todos los parámetros."""
-    
-    geometry: AircraftGeometry = field(default_factory=AircraftGeometry)
-    inertia: InertiaProperties = field(default_factory=InertiaProperties)
-    aero: AerodynamicCoefficients = field(default_factory=AerodynamicCoefficients)
-    flight: FlightConditions = field(default_factory=FlightConditions)
-    propulsion: PropulsionSystem = field(default_factory=PropulsionSystem)
-    vtol_mode: VTOLModeParameters = field(default_factory=VTOLModeParameters)
-    
+class AircraftConfig:
+    """Contenedor maestro — instancia única para todos los módulos."""
+    atm:      Atmosphere     = field(default_factory=Atmosphere)
+    mass:     MassProperties = field(default_factory=MassProperties)
+    wing:     WingGeometry   = field(default_factory=WingGeometry)
+    htail:    HTailGeometry  = field(default_factory=HTailGeometry)
+    vtail:    VTailGeometry  = field(default_factory=VTailGeometry)
+    aileron:  AileronGeometry = field(default_factory=AileronGeometry)
+    aero:     AeroDerivatives = field(default_factory=AeroDerivatives)
+    prop:     PropulsionSystem = field(default_factory=PropulsionSystem)
+
     def __post_init__(self):
-        """Validar consistencia y calcular parámetros derivados."""
-        self._validate()
-        self._calculate_derived()
-    
-    def _validate(self):
-        """Verificar consistencia de parámetros."""
-        m = self.geometry.mtow
-        
-        # T/W ratio
-        T_vertical_total = (self.propulsion.vertical_motor_num * 
-                           self.propulsion.vertical_motor_max_thrust_kg * 9.81)
-        T_W_vertical = T_vertical_total / (m * 9.81)
-        
-        # Relajar requisito: T/W ≥ 1.0 suficiente para hover con controles
-        assert T_W_vertical >= 1.0, f"T/W vertical ({T_W_vertical:.2f}) < 1.0 insufficient"
-        
-        # Carga alar
-        W_S = (m * 9.81) / self.geometry.wing_area
-        print(f"✓ Validación OK: W/S = {W_S:.1f} N/m², T/W_vertical = {T_W_vertical:.2f}")
-    
-    def _calculate_derived(self):
-        """Calcular parámetros derivados."""
-        m = self.geometry.mtow
-        S = self.geometry.wing_area
-        b = self.geometry.wing_span
-        c = self.geometry.wing_chord_mean
-        
-        # Factor de amortiguamiento inducido
-        self.K_induced = 1 / (np.pi * self.aero.oswald_efficiency * self.geometry.aspect_ratio)
-        
-        # Velocidades características
-        self.V_cruise_ms = self.flight.v_cruise_ms
-        self.V_stall_ms = self.flight.v_stall_ms
-        self.V_never_exceed_ms = self.flight.v_cruise_ms * 1.5  # Vne ~1.5 Vc
-        
-        # Cargas de referencia
-        self.dynamic_pressure_cruise_Pa = 0.5 * self.flight.rho * self.V_cruise_ms**2
-        
-        # Dimensiones características para estabilidad
-        self.S_h_S_ratio = self.geometry.horizontal_tail_area / S  # Proporción cola horiz
-        self.S_v_S_ratio = self.geometry.vertical_tail_area / S  # Proporción cola vert
-        
-        print(f"""
-╔════════════════════════════════════════════════════════════════╗
-║           PARÁMETROS VTOL CARIBE - RESUMEN EJECUTIVO          ║
-╚════════════════════════════════════════════════════════════════╝
-MASA & GEOMETRÍA:
-  • MTOW: {m:.2f} kg
-  • Envergadura: {b:.2f} m | Superficie: {S:.3f} m² | AR: {self.geometry.aspect_ratio:.2f}
-  • Cuerda media: {c:.3f} m | W/S: {(m*9.81)/S:.1f} N/m²
+        self._compute_derived()
 
-MOMENTOS DE INERCIA (calculados):
-  • Ixx (roll):  {self.inertia.Ixx:.4f} kg·m²
-  • Iyy (pitch): {self.inertia.Iyy:.4f} kg·m²
-  • Izz (yaw):   {self.inertia.Izz:.4f} kg·m²
+    def _compute_derived(self):
+        """Calcula y verifica parámetros derivados inter-módulos."""
+        w = self.wing
+        ht = self.htail
+        m = self.mass
 
-AERODINÁMICA:
-  • CD₀: {self.aero.CD0:.3f} | CL_α: {self.aero.CLalpha:.2f} rad⁻¹
-  • Cm_α: {self.aero.Cm_alpha:.2f} rad⁻¹ | Cn_β: {self.aero.Cn_beta:.2f} rad⁻¹
-  • K_induced: {self.K_induced:.5f}
+        # Brazo de cola
+        self.lt = ht.x_ac_t - m.x_cg   # [m] [DERIVED]
 
-PROPULSIÓN:
-  • Vertical: {self.propulsion.vertical_motor_num} motores × {self.propulsion.vertical_motor_max_thrust_kg:.2f} kgf
-  • Horizontal: 1 motor × {self.propulsion.horizontal_motor_max_thrust_kg:.2f} kgf (pusher)
+        # VH verificación
+        VH_check = self.lt * ht.S_t / (w.S * w.c_bar)
+        assert abs(VH_check - self.aero.VH) < 0.01, (
+            f"VH check: {VH_check:.3f} vs {self.aero.VH:.3f}"
+        )
 
-VELOCIDADES:
-  • Crucero: {self.V_cruise_ms:.2f} m/s ({self.V_cruise_ms*3.6:.1f} km/h)
-  • Pérdida: {self.V_stall_ms:.2f} m/s ({self.V_stall_ms*3.6:.1f} km/h)
-  • Vne: {self.V_never_exceed_ms:.2f} m/s ({self.V_never_exceed_ms*3.6:.1f} km/h)
-╚════════════════════════════════════════════════════════════════╝
-        """)
+        # Velocidades de referencia
+        rho = self.atm.rho
+        g   = self.atm.g
+        self.V_cruise = 19.34   # [m/s] velocidad crucero [CONFIRMED]
+        self.V_stall  = 11.11   # [m/s] velocidad pérdida [CONFIRMED]
+
+        # Presión dinámica en crucero
+        self.q_cruise = 0.5 * rho * self.V_cruise**2   # [Pa] [DERIVED]
+        self.q_stall  = 0.5 * rho * self.V_stall**2    # [Pa] [DERIVED]
+
+        # Factor de arrastre inducido
+        self.K = 1.0 / (np.pi * self.aero.e_oswald * w.AR)   # [DERIVED]
+
+        # CL de trim en crucero: L = W → CL_trim = W/(q·S)
+        W = m.m * g
+        self.CL_trim = W / (self.q_cruise * w.S)   # [DERIVED]
+
+        # Coeficiente de volumen vertical: VV = Sv·lv/(S·b)
+        lv = self.vtail.x_ac_v - m.x_cg
+        self.VV = self.vtail.S_v * lv / (w.S * w.b)   # [DERIVED]
+
+    def summary(self) -> str:
+        m = self.mass
+        w = self.wing
+        a = self.aero
+        lines = [
+            "=" * 64,
+            " VTOL CARIBE — PARÁMETROS CONSOLIDADOS",
+            "=" * 64,
+            f"MASA:      m = {m.m:.2f} kg   CG = {m.x_cg:.3f} m",
+            f"ALA:       S = {w.S:.3f} m²  AR = {w.AR:.2f}  c̄ = {w.c_bar:.3f} m",
+            f"           x_ac = {w.x_ac:.3f} m  x_LE = {w.x_LE:.3f} m [PROVISIONAL]",
+            f"COLA H:    St = {self.htail.S_t:.4f} m²  lt = {self.lt:.3f} m",
+            f"           x_ac_t = {self.htail.x_ac_t:.3f} m  it = {np.degrees(self.htail.i_t):.1f}°",
+            f"VH = {a.VH:.3f}  VV = {self.VV:.4f} [DERIVED]",
+            f"AERO:      CLa_w = {a.CLa_w:.4f}/rad  CLa_t = {a.CLa_t:.4f}/rad",
+            f"           CMa_w = {a.CMa_w:.3f}/rad  dε/dα = {a.deps_da:.3f}",
+            f"           CD0 = {a.CD0_cruise:.4f}  e = {a.e_oswald:.2f}  K = {self.K:.5f}",
+            f"           CLq = {a.CLq:.3f}  Cmq = {a.Cmq:.3f}  [DERIVED]",
+            f"           CLde = {a.CLde:.4f}  CMde = {a.CMde:.4f}  [DERIVED]",
+            f"VUELO:     V_cruise = {self.V_cruise:.2f} m/s  V_stall = {self.V_stall:.2f} m/s",
+            f"           q_cruise = {self.q_cruise:.2f} Pa  CL_trim = {self.CL_trim:.4f}",
+            "=" * 64,
+        ]
+        return "\n".join(lines)
 
 
-# ============================================================================
-# 4. INSTANCIA GLOBAL DE PARÁMETROS POR DEFECTO
-# ============================================================================
+def get_aircraft_config() -> AircraftConfig:
+    """Retorna la configuración consolidada del VTOL Caribe."""
+    return AircraftConfig()
 
-def get_default_vtol_parameters() -> VTOLAircraftParameters:
-    """Retorna instancia con parámetros por defecto del VTOL Caribe."""
-    return VTOLAircraftParameters()
+
+# Alias para compatibilidad con módulos existentes
+def get_default_vtol_parameters() -> AircraftConfig:
+    return get_aircraft_config()
 
 
 if __name__ == "__main__":
-    # Test: crear parámetros y validar
-    params = get_default_vtol_parameters()
-    print("✓ Parámetros cargados exitosamente")
-
+    cfg = get_aircraft_config()
+    print(cfg.summary())
+    print(f"\nDerivadas de tasa calculadas:")
+    a = cfg.aero
+    print(f"  CLq     = {a.CLq:.4f} /rad")
+    print(f"  Cmq     = {a.Cmq:.4f} /rad")
+    print(f"  CLa_dot = {a.CLa_dot:.4f} /rad")
+    print(f"  Cma_dot = {a.Cma_dot:.4f} /rad")
+    print(f"  CLde    = {a.CLde:.4f} /rad")
+    print(f"  CMde    = {a.CMde:.4f} /rad")
+    print(f"\n✓ parameters.py OK")
