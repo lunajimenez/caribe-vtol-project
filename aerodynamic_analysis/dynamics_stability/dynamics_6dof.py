@@ -1,464 +1,353 @@
 """
 ================================================================================
-MOTOR DE DINÁMICAS 6 DOF - ECUACIONES DE MOVIMIENTO COMPLETAS
+ECUACIONES DE MOVIMIENTO 6 DOF -- INTEGRADOR RK4
 ================================================================================
-Implementa el sistema de ecuaciones diferenciales de un vehículo aéreo rígido:
+Implementa las ecuaciones de Bryan (1911) / Newton-Euler para un cuerpo rígido
+en el espacio:
 
-ECUACIONES DE TRASLACIÓN (Newton's Second Law, Body Frame):
-  m·du/dt = Fx - m·g·sin(θ) + q·m·w - r·m·v
-  m·dv/dt = Fy + m·g·sin(φ)·cos(θ) - p·m·w + r·m·u
-  m·dw/dt = Fz + m·g·cos(φ)·cos(θ) + p·m·v - q·m·u
+  TRASLACIÓN (body frame):
+    u_dot = Fx/m + r*v - q*w
+    v_dot = Fy/m - r*u + p*w
+    _ = Fz/m + q*u - p*v
 
-donde (u, v, w) son velocidades en Body Frame, (Fx, Fy, Fz) fuerzas totales.
+  ROTACIÓN (Euler, body frame):
+    [Ixx  0  -Ixz] [_]   [L - (Iyy-Izz)*q*r - Ixz*p*q]
+    [ 0  Iyy  0  ] [q_dot] = [M - (Izz-Ixx)*p*r - Ixz*(r2-p2)]
+    [-Ixz 0   Izz] [_]   [N - (Ixx-Iyy)*p*q - Ixz*q*r]
 
-ECUACIONES DE ROTACIÓN (Euler's Equations, Body Frame):
-  Ixx·dp/dt + Ixz·dr/dt = L - (Iyy-Izz)·q·r - Ixz·p·q
-  Iyy·dq/dt = M - (Izz-Ixx)·p·r - Ixz·(p²-r²)
-  Izz·dr/dt + Ixz·dp/dt = N - (Ixx-Iyy)·p·q - Ixz·q·r
+  CINEMÁTICA (ángulos de Euler):
+    __dot = p + (q*sin _ + r*cos _)*tan theta
+    theta_dot = q*cos _ - r*sin _
+    __dot = (q*sin _ + r*cos _) / cos theta
 
-donde (p, q, r) son velocidades angulares, (L, M, N) momentos externos.
+  NAVEGACIÓN (NED):
+    [_, _, _]_NED = DCM(_,theta,_)_ * [u, v, w]_body
 
-CINEMÁTICA (Euler Angles):
-  dφ/dt = p + q·sin(φ)·tan(θ) + r·cos(φ)·tan(θ)
-  dθ/dt = q·cos(φ) - r·sin(φ)
-  dψ/dt = q·sin(φ)/cos(θ) + r·cos(φ)/cos(θ)
+Vector de estado: y = [u, v, w, p, q, r, _, theta, _, x, y, z]  (12 estados)
 
-NAVEGACIÓN (Position in Earth Frame):
-  Transformación de velocidades: Body → Earth usando matriz de rotación.
+Integrador: RK4 de paso fijo (robusto, sin overhead de control de paso).
 
-================================================================================
-Referencia: Etkin & Reid, "Dynamics of Atmospheric Flight", 1996
-            Nelson, "Flight Stability and Automatic Control", 2nd Ed., 1998
+Referencias:
+  Bryan (1911) "Stability in Aviation"
+  Etkin & Reid (1996) "Dynamics of Atmospheric Flight" Ch.4
+  Nelson (1998) "Flight Stability and Automatic Control" Ch.3
 ================================================================================
 """
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Tuple, List, Callable
-from scipy.integrate import odeint, solve_ivp
-from parameters import VTOLAircraftParameters
-from forces_moments import AerodynamicCalculator, ThrustCalculator
+from typing import Callable, List, Tuple
 
+from parameters import AircraftConfig, get_aircraft_config
+from forces_moments import AeroModel, PropModel, airspeed_angles
+
+
+# ============================================================================
+# ESTADO Y MANDO
+# ============================================================================
 
 @dataclass
-class AircraftState:
-    """
-    Estado completo del VTOL en tiempo t.
-    
-    Posición y velocidad (Earth/Body Frame):
-      - Posición (x, y, z) en Earth Frame NED
-      - Velocidad (u, v, w) en Body Frame
-    
-    Actitud (Euler angles):
-      - φ (phi): roll angle
-      - θ (theta): pitch angle
-      - ψ (psi): yaw angle
-    
-    Velocidades angulares (Body Frame):
-      - p: roll rate (alrededor eje X)
-      - q: pitch rate (alrededor eje Y)
-      - r: yaw rate (alrededor eje Z)
-    """
-    
-    # Posición en Earth Frame (metros)
-    x: float = 0.0
-    y: float = 0.0
-    z: float = 0.0
-    
-    # Velocidad en Body Frame (m/s)
-    u: float = 0.0
-    v: float = 0.0
-    w: float = 0.0
-    
-    # Actitud - Ángulos de Euler (radianes)
-    phi: float = 0.0  # Roll
-    theta: float = 0.0  # Pitch
-    psi: float = 0.0  # Yaw
-    
-    # Velocidades angulares en Body Frame (rad/s)
-    p: float = 0.0  # Roll rate
-    q: float = 0.0  # Pitch rate
-    r: float = 0.0  # Yaw rate
-    
-    # Tiempo de simulación
-    t: float = 0.0
-    
+class State:
+    """Vector de estado completo del VTOL (12 estados)."""
+    # Velocidades translacionales en body frame [m/s]
+    u: float = 0.0   # +X adelante
+    v: float = 0.0   # +Y ala derecha
+    w: float = 0.0   # +Z abajo
+
+    # Velocidades angulares en body frame [rad/s]
+    p: float = 0.0   # roll rate
+    q: float = 0.0   # pitch rate
+    r: float = 0.0   # yaw rate
+
+    # Ángulos de Euler [rad]
+    phi:   float = 0.0   # roll
+    theta: float = 0.0   # pitch
+    psi:   float = 0.0   # yaw
+
+    # Posición en Earth frame NED [m]
+    x_e: float = 0.0
+    y_e: float = 0.0
+    z_e: float = 0.0   # positivo hacia abajo
+
     def to_array(self) -> np.ndarray:
-        """Convierte estado a array [x, y, z, u, v, w, φ, θ, ψ, p, q, r]."""
         return np.array([
-            self.x, self.y, self.z,
             self.u, self.v, self.w,
+            self.p, self.q, self.r,
             self.phi, self.theta, self.psi,
-            self.p, self.q, self.r
+            self.x_e, self.y_e, self.z_e,
         ], dtype=float)
-    
+
     @staticmethod
-    def from_array(state: np.ndarray, t: float = 0.0) -> 'AircraftState':
-        """Crea AircraftState desde array."""
-        return AircraftState(
-            x=state[0], y=state[1], z=state[2],
-            u=state[3], v=state[4], w=state[5],
-            phi=state[6], theta=state[7], psi=state[8],
-            p=state[9], q=state[10], r=state[11],
-            t=t
+    def from_array(y: np.ndarray) -> "State":
+        return State(
+            u=y[0], v=y[1], w=y[2],
+            p=y[3], q=y[4], r=y[5],
+            phi=y[6], theta=y[7], psi=y[8],
+            x_e=y[9], y_e=y[10], z_e=y[11],
         )
+
+    @property
+    def V(self) -> float:
+        return float(np.sqrt(self.u**2 + self.v**2 + self.w**2))
+
+    @property
+    def alpha(self) -> float:
+        return float(np.arctan2(self.w, self.u))
+
+    @property
+    def beta(self) -> float:
+        V = max(self.V, 0.5)
+        return float(np.arcsin(np.clip(self.v / V, -1.0, 1.0)))
+
+    @property
+    def altitude(self) -> float:
+        return -self.z_e   # altitud = -z_NED
 
 
 @dataclass
-class ControlInput:
-    """Comandos de control del piloto/autopiloto."""
-    
-    # Throttle (0.0 = idle, 1.0 = máximo)
-    throttle_vertical: float = 0.5  # Comando para rotores verticales
-    throttle_horizontal: float = 0.5  # Comando para motor horizontal
-    
-    # Control de superficies (radianes)
-    delta_e: float = 0.0  # Elevador (pitch control)
-    delta_a: float = 0.0  # Alerones (roll control)
-    delta_r: float = 0.0  # Timón (yaw control)
-    
-    # Control diferencial de rotores (modo VTOL)
-    roll_cmd: float = 0.0  # [-1, 1]
-    pitch_cmd: float = 0.0  # [-1, 1]
-    yaw_cmd: float = 0.0  # [-1, 1]
-    
-    # Modo de operación
-    mode: str = "HOVER"  # "HOVER", "TRANSITION", "CRUISE"
+class Controls:
+    """Mandos de vuelo."""
+    delta_e:  float = 0.0    # elevador [rad]
+    delta_a:  float = 0.0    # alerón   [rad]
+    delta_r:  float = 0.0    # rudder   [rad]
+    throttle: float = 0.0    # motor pusher [0-1]
+
+    # Rotores VTOL (sólo en modos HOVER/TRANSICIÓN)
+    throttle_vtol: float = 0.0  # [0-1]
 
 
-class VTOLDynamicsEngine:
+# ============================================================================
+# MATRIZ DCM Y CINEMÁTICA
+# ============================================================================
+
+def euler_dcm(phi: float, theta: float, psi: float) -> np.ndarray:
     """
-    Motor principal de dinámicas VTOL.
-    
-    Integra ecuaciones de movimiento 6 DOF usando RK45 y proporciona
-    análisis de estabilidad.
-    
-    Flujo principal:
-    1. Leer estado (x, y, z, u, v, w, φ, θ, ψ, p, q, r)
-    2. Calcular fuerzas/momentos aerodinámicos + propulsión
-    3. Integrar ecuaciones diferenciales
-    4. Retornar nuevo estado
+    DCM body -> NED (R_bn).  NED_vec = DCM @ body_vec
+    Ref: Etkin (1996) Eq. 4.1.3
     """
-    
-    def __init__(self, params: VTOLAircraftParameters):
-        self.params = params
-        self.geom = params.geometry
-        self.inertia = params.inertia
-        self.flight = params.flight
-        
-        # Calculadores
-        self.aero_calc = AerodynamicCalculator(params)
-        self.thrust_calc = ThrustCalculator(params)
-        
-        # Historia de simulación
-        self.history: List[AircraftState] = []
-        self.time_history: List[float] = []
-    
-    # ========================================================================
-    # ECUACIONES DE MOVIMIENTO (TRASLACIÓN Y ROTACIÓN)
-    # ========================================================================
-    
-    def _derivatives(self, t: float, y: np.ndarray, control: ControlInput) -> np.ndarray:
+    cp, sp = np.cos(phi),   np.sin(phi)
+    ct, st = np.cos(theta), np.sin(theta)
+    cs, ss = np.cos(psi),   np.sin(psi)
+    return np.array([
+        [ct*cs,   sp*st*cs - cp*ss,   cp*st*cs + sp*ss],
+        [ct*ss,   sp*st*ss + cp*cs,   cp*st*ss - sp*cs],
+        [-st,     sp*ct,              cp*ct            ],
+    ])
+
+
+# ============================================================================
+# MOTOR DE DINÁMICAS 6 DOF
+# ============================================================================
+
+class Dynamics6DOF:
+    """
+    Motor de integración 6 DOF con RK4.
+
+    Uso:
+        dyn = Dynamics6DOF(cfg)
+        states, times = dyn.simulate(x0, control_fn, t_end=30.0, dt=0.02)
+    """
+
+    def __init__(self, cfg: AircraftConfig):
+        self.cfg   = cfg
+        self.aero  = AeroModel(cfg)
+        self.prop  = PropModel(cfg)
+
+    # ------------------------------------------------------------------ #
+    # DERIVADAS DE ESTADO dy/dt                                           #
+    # ------------------------------------------------------------------ #
+
+    def derivatives(self, y: np.ndarray, ctrl: Controls) -> np.ndarray:
         """
-        Calcula derivadas de estado: dy/dt
-        
-        Implementa el sistema completo de ecuaciones diferenciales:
-          dx/dt, dy/dt, dz/dt: Integración de velocidades
-          du/dt, dv/dt, dw/dt: Ecuaciones de traslación Newton
-          dφ/dt, dθ/dt, dψ/dt: Cinemática de Euler
-          dp/dt, dq/dt, dr/dt: Ecuaciones de rotación Euler
-        
+        Calcula _ = f(y, u) para el integrador RK4.
+
         Args:
-          t: tiempo actual (s)
-          y: estado [x, y, z, u, v, w, φ, θ, ψ, p, q, r]
-          control: ControlInput con comandos
-        
+            y:    vector de estado (12,)
+            ctrl: Controls con mandos actuales
+
         Returns:
-          dy/dt en Body Frame + transformaciones
+            dy/dt (12,)
         """
-        # Desempacar estado
-        state = AircraftState.from_array(y, t)
-        x, y_pos, z = state.x, state.y, state.z
-        u, v, w = state.u, state.v, state.w
-        phi, theta, psi = state.phi, state.theta, state.psi
-        p, q, r = state.p, state.q, state.r
-        
-        # Parámetros inerciales
-        m = self.geom.mtow
-        g = self.flight.g
-        Ixx = self.inertia.Ixx
-        Iyy = self.inertia.Iyy
-        Izz = self.inertia.Izz
-        Ixz = self.inertia.Ixz
-        
-        # ====================================================================
-        # PASO 1: CALCULAR FUERZAS Y MOMENTOS
-        # ====================================================================
-        
-        # Gravedad (Body Frame)
-        Fx_g = -m * g * np.sin(theta)
-        Fy_g = m * g * np.sin(phi) * np.cos(theta)
-        Fz_g = m * g * np.cos(phi) * np.cos(theta)
-        
-        # Fuerzas aerodinámicas + propulsión según modo
-        if control.mode == "HOVER":
-            # Hover: Rotores verticales dominan
-            Fx_h, Fy_h, Fz_h = self.thrust_calc.compute_hover_forces(
-                control.throttle_vertical
-            )
-            Fx_a, Fy_a, Fz_a, alpha, beta, V = \
-                self.aero_calc.compute_aerodynamic_forces(u, v, w, p, q, r)
-            
-            # Momentos en hover (control diferencial)
-            _, _, _, L_h, M_h, N_h = \
-                self.thrust_calc.compute_transition_forces_moments(
-                    control.throttle_vertical, control.throttle_horizontal,
-                    control.roll_cmd, control.pitch_cmd, control.yaw_cmd
-                )
-            L_a, M_a, N_a, _, _, _ = \
-                self.aero_calc.compute_aerodynamic_moments(
-                    u, v, w, p, q, r, control.delta_e,
-                    control.delta_a, control.delta_r
-                )
-        
-        elif control.mode == "TRANSITION":
-            # Transición: Mezcla de empujes
-            Fx_h, Fy_h, Fz_h, L_h, M_h, N_h = \
-                self.thrust_calc.compute_transition_forces_moments(
-                    control.throttle_vertical, control.throttle_horizontal,
-                    control.roll_cmd, control.pitch_cmd, control.yaw_cmd
-                )
-            Fx_a, Fy_a, Fz_a, alpha, beta, V = \
-                self.aero_calc.compute_aerodynamic_forces(
-                    u, v, w, p, q, r, control.delta_e,
-                    control.delta_a, control.delta_r
-                )
-            L_a, M_a, N_a, _, _, _ = \
-                self.aero_calc.compute_aerodynamic_moments(
-                    u, v, w, p, q, r, control.delta_e,
-                    control.delta_a, control.delta_r
-                )
-        
-        else:  # CRUISE
-            # Crucero: Ala fija dominante
-            Fx_h, _, Fz_h, _, _, _ = \
-                self.thrust_calc.compute_cruise_forces_moments(
-                    control.throttle_horizontal, control.throttle_vertical
-                )
-            Fx_a, Fy_a, Fz_a, alpha, beta, V = \
-                self.aero_calc.compute_aerodynamic_forces(
-                    u, v, w, p, q, r, control.delta_e,
-                    control.delta_a, control.delta_r
-                )
-            L_a, M_a, N_a, _, _, _ = \
-                self.aero_calc.compute_aerodynamic_moments(
-                    u, v, w, p, q, r, control.delta_e,
-                    control.delta_a, control.delta_r
-                )
-            Fy_h = 0.0
-            L_h = M_h = N_h = 0.0
-        
-        # Fuerzas totales en Body Frame
-        Fx_total = Fx_h + Fx_a + Fx_g
-        Fy_total = Fy_h + Fy_a + Fy_g
-        Fz_total = Fz_h + Fz_a + Fz_g
-        
-        # Momentos totales
-        L_total = L_h + L_a
-        M_total = M_h + M_a
-        N_total = N_h + N_a
-        
-        # ====================================================================
-        # PASO 2: ECUACIONES DE TRASLACIÓN (Newton, Body Frame)
-        # ====================================================================
-        # Aceleraciones lineales
-        u_dot = (Fx_total / m) + r * v - q * w
-        v_dot = (Fy_total / m) + p * w - r * u
-        w_dot = (Fz_total / m) + q * u - p * v
-        
-        # ====================================================================
-        # PASO 3: CINEMÁTICA DE EULER (Actitud)
-        # ====================================================================
-        # Transformar velocidades angulares a derivadas de Euler
-        phi_dot = p + q * np.sin(phi) * np.tan(theta) + \
-                  r * np.cos(phi) * np.tan(theta)
-        
-        theta_dot = q * np.cos(phi) - r * np.sin(phi)
-        
-        # Protección contra singularidad en theta = ±π/2
-        if np.abs(np.cos(theta)) > 1e-6:
-            psi_dot = (q * np.sin(phi) + r * np.cos(phi)) / np.cos(theta)
-        else:
-            psi_dot = 0.0
-        
-        # ====================================================================
-        # PASO 4: NAVEGACIÓN (Posición en Earth Frame)
-        # ====================================================================
-        # Matriz de transformación Body → Earth (NED)
-        c_phi = np.cos(phi)
-        s_phi = np.sin(phi)
-        c_theta = np.cos(theta)
-        s_theta = np.sin(theta)
-        c_psi = np.cos(psi)
-        s_psi = np.sin(psi)
-        
-        # Rotación Body → Earth
-        x_dot = (c_theta * c_psi) * u + \
-                (s_phi * s_theta * c_psi - c_phi * s_psi) * v + \
-                (c_phi * s_theta * c_psi + s_phi * s_psi) * w
-        
-        y_dot = (c_theta * s_psi) * u + \
-                (s_phi * s_theta * s_psi + c_phi * c_psi) * v + \
-                (c_phi * s_theta * s_psi - s_phi * c_psi) * w
-        
-        z_dot = -s_theta * u + s_phi * c_theta * v + c_phi * c_theta * w
-        
-        # ====================================================================
-        # PASO 5: ECUACIONES DE ROTACIÓN (Euler, Body Frame)
-        # ====================================================================
-        # Matrices para resolver sistema acoplado
-        # [Ixx  0  -Ixz] [p_dot]   [L - (Iyy-Izz)qr - Ixz(pq)]
-        # [ 0  Iyy  0  ] [q_dot] = [M - (Izz-Ixx)pr - Ixz(p²-r²)]
-        # [-Ixz  0  Izz] [r_dot]   [N - (Ixx-Iyy)pq - Ixz(qr)]
-        
-        a11 = Ixx
-        a13 = -Ixz
-        a22 = Iyy
-        a31 = -Ixz
-        a33 = Izz
-        
-        # RHS
-        b1 = L_total - (Iyy - Izz) * q * r - Ixz * p * q
-        b2 = M_total - (Izz - Ixx) * p * r - Ixz * (p**2 - r**2)
-        b3 = N_total - (Ixx - Iyy) * p * q - Ixz * q * r
-        
-        # Resolver sistema 3x3
-        A_mat = np.array([
-            [a11, 0, a13],
-            [0, a22, 0],
-            [a31, 0, a33]
-        ])
-        
-        b_vec = np.array([b1, b2, b3])
-        
-        try:
-            rates = np.linalg.solve(A_mat, b_vec)
-            p_dot, q_dot, r_dot = rates[0], rates[1], rates[2]
-        except np.linalg.LinAlgError:
-            # Fallback si matriz singular (improbable)
-            p_dot = (L_total - (Iyy - Izz) * q * r) / Ixx
-            q_dot = M_total / Iyy
-            r_dot = (N_total - (Ixx - Iyy) * p * q) / Izz
-        
-        # ====================================================================
-        # RETORNAR DERIVADAS
-        # ====================================================================
-        dy_dt = np.array([
-            x_dot, y_dot, z_dot,
-            u_dot, v_dot, w_dot,
-            phi_dot, theta_dot, psi_dot,
-            p_dot, q_dot, r_dot
-        ], dtype=float)
-        
-        return dy_dt
-    
-    # ========================================================================
-    # INTEGRACIÓN Y SIMULACIÓN
-    # ========================================================================
-    
-    def simulate(self, initial_state: AircraftState,
-                control_func: Callable[[float, AircraftState], ControlInput],
-                t_end: float = 60.0, dt: float = 0.01,
-                method: str = "RK45") -> Tuple[List[AircraftState], np.ndarray]:
-        """
-        Simula dinámicas VTOL sobre horizonte de tiempo.
-        
-        Args:
-          initial_state: AircraftState inicial
-          control_func: Función que retorna ControlInput en función de (t, state)
-          t_end: tiempo final de simulación (s)
-          dt: paso de tiempo para salida (s)
-          method: método de integración ("RK45" recomendado)
-        
-        Returns:
-          (states_list, time_array)
-        """
-        y0 = initial_state.to_array()
-        t_span = (0.0, t_end)
-        t_eval = np.arange(0.0, t_end, dt)
-        
-        # Wrapper para incluir control
-        def derivatives_wrapper(t, y):
-            state = AircraftState.from_array(y, t)
-            control = control_func(t, state)
-            return self._derivatives(t, y, control)
-        
-        # Integrar
-        sol = solve_ivp(
-            derivatives_wrapper,
-            t_span,
-            y0,
-            method=method,
-            t_eval=t_eval,
-            dense_output=True,
-            max_step=dt * 10,
-            rtol=1e-8,
-            atol=1e-10
+        s  = State.from_array(y)
+        cfg = self.cfg
+        m   = cfg.mass
+        atm = cfg.atm
+
+        u, v, w  = s.u, s.v, s.w
+        p, q, r  = s.p, s.q, s.r
+        phi, theta, psi = s.phi, s.theta, s.psi
+
+        mass = m.m
+        Ixx, Iyy, Izz, Ixz = m.Ixx, m.Iyy, m.Izz, m.Ixz
+
+        # ---- Fuerzas y momentos aerodinámicos + gravedad ----
+        T_pusher = self.prop.thrust_pusher(ctrl.throttle)
+
+        F, M_vec = self.aero.forces_moments(
+            u, v, w, p, q, r, phi, theta,
+            delta_e=ctrl.delta_e,
+            delta_a=ctrl.delta_a,
+            delta_r=ctrl.delta_r,
+            thrust=T_pusher,
         )
-        
-        # Convertir a lista de estados
-        states = []
-        for i, t in enumerate(sol.t):
-            state = AircraftState.from_array(sol.y[:, i], t)
-            states.append(state)
-        
-        self.history = states
-        self.time_history = list(sol.t)
-        
-        return states, sol.t
-    
-    def get_history(self):
-        """Retorna historia de simulación."""
-        return self.history, np.array(self.time_history)
 
+        # Añadir empuje VTOL (rotores en -Z body)
+        T_vtol = self.prop.thrust_rotors(ctrl.throttle_vtol)
+        F[2]  -= T_vtol    # -Z body = hacia arriba
+
+        Fx, Fy, Fz = F
+        L_mom, M_mom, N_mom = M_vec
+
+        # ---- Ecuaciones traslacionales (Bryan 1911) ----
+        u_dot = Fx / mass + r * v - q * w
+        v_dot = Fy / mass - r * u + p * w
+        w_dot = Fz / mass + q * u - p * v
+
+        # ---- Ecuaciones rotacionales -- sistema 2x2 acoplado en (p,r) ----
+        # [Ixx  -Ixz][_]   [L - (Iyy-Izz)*q*r - Ixz*p*q]
+        # [-Ixz  Izz][_] = [N - (Ixx-Iyy)*p*q - Ixz*q*r]
+        rhs1 = L_mom - (Iyy - Izz) * q * r - Ixz * p * q
+        rhs3 = N_mom - (Ixx - Iyy) * p * q - Ixz * q * r
+        det  = Ixx * Izz - Ixz**2
+        p_dot = ( Izz * rhs1 + Ixz * rhs3) / det
+        r_dot = ( Ixz * rhs1 + Ixx * rhs3) / det
+
+        q_dot = (M_mom - (Izz - Ixx) * p * r - Ixz * (r**2 - p**2)) / Iyy
+
+        # ---- Cinemática de Euler ----
+        cos_theta = np.cos(theta)
+        # Singularidad en theta = ±90°; proteger
+        if abs(cos_theta) < 1e-4:
+            cos_theta = np.sign(cos_theta) * 1e-4
+
+        phi_dot   = p + (q * np.sin(phi) + r * np.cos(phi)) * np.tan(theta)
+        theta_dot = q * np.cos(phi) - r * np.sin(phi)
+        psi_dot   = (q * np.sin(phi) + r * np.cos(phi)) / cos_theta
+
+        # ---- Posición NED ----
+        DCM = euler_dcm(phi, theta, psi)
+        vel_ned = DCM @ np.array([u, v, w])
+        x_dot, y_dot, z_dot = vel_ned
+
+        return np.array([
+            u_dot, v_dot, w_dot,
+            p_dot, q_dot, r_dot,
+            phi_dot, theta_dot, psi_dot,
+            x_dot, y_dot, z_dot,
+        ])
+
+    # ------------------------------------------------------------------ #
+    # INTEGRADOR RK4 DE PASO FIJO                                         #
+    # ------------------------------------------------------------------ #
+
+    def _rk4_step(
+        self,
+        t:    float,
+        y:    np.ndarray,
+        ctrl: Controls,
+        dt:   float,
+        ctrl_fn: Callable,
+    ) -> np.ndarray:
+        """Un paso RK4. ctrl_fn(t, State) -> Controls."""
+        k1 = self.derivatives(y,              ctrl_fn(t,        State.from_array(y)))
+        k2 = self.derivatives(y + 0.5*dt*k1,  ctrl_fn(t+0.5*dt, State.from_array(y + 0.5*dt*k1)))
+        k3 = self.derivatives(y + 0.5*dt*k2,  ctrl_fn(t+0.5*dt, State.from_array(y + 0.5*dt*k2)))
+        k4 = self.derivatives(y + dt*k3,       ctrl_fn(t+dt,     State.from_array(y + dt*k3)))
+        return y + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
+    def simulate(
+        self,
+        x0:      State,
+        ctrl_fn: Callable[[float, State], Controls],
+        t_end:   float = 60.0,
+        dt:      float = 0.02,
+    ) -> Tuple[List[State], np.ndarray]:
+        """
+        Integra las ecuaciones 6 DOF con RK4 de paso fijo.
+
+        Args:
+            x0:      estado inicial
+            ctrl_fn: función (t, State) -> Controls
+            t_end:   tiempo final [s]
+            dt:      paso de integración [s]
+
+        Returns:
+            (states_list, time_array)
+        """
+        times  = np.arange(0.0, t_end + dt, dt)
+        y      = x0.to_array()
+        states = [State.from_array(y)]
+
+        for i, t in enumerate(times[:-1]):
+            ctrl = ctrl_fn(t, State.from_array(y))
+            y    = self._rk4_step(t, y, ctrl, dt, ctrl_fn)
+            states.append(State.from_array(y))
+
+        return states, times[:len(states)]
+
+
+# ============================================================================
+# LINEALIZACIÓN NUMÉRICA (para stability_analysis)
+# ============================================================================
+
+def numerical_jacobian(
+    dyn:   Dynamics6DOF,
+    y_eq:  np.ndarray,
+    ctrl:  Controls,
+    eps:   float = 1e-5,
+) -> np.ndarray:
+    """
+    Jacobiano numérico A = _f/_y por diferencias centrales, evaluado en y_eq.
+
+    A[i,j] = (f_i(y + eps*ej) - f_i(y - eps*ej)) / (2*eps)
+
+    Returns:
+        A (12x12)
+    """
+    n  = len(y_eq)
+    f0 = dyn.derivatives(y_eq, ctrl)
+    A  = np.zeros((n, n))
+    for j in range(n):
+        yp = y_eq.copy(); yp[j] += eps
+        ym = y_eq.copy(); ym[j] -= eps
+        A[:, j] = (dyn.derivatives(yp, ctrl) - dyn.derivatives(ym, ctrl)) / (2.0 * eps)
+    return A
+
+
+# ============================================================================
+# MAIN -- prueba de integración básica
+# ============================================================================
 
 if __name__ == "__main__":
-    from parameters import get_default_vtol_parameters
-    
-    print("\n" + "="*70)
-    print("TEST: MOTOR 6 DOF VTOL")
-    print("="*70)
-    
-    params = get_default_vtol_parameters()
-    engine = VTOLDynamicsEngine(params)
-    
-    # Estado inicial: hover a cierta altitud
-    initial_state = AircraftState(
-        z=0.0,  # 0 m sobre suelo
-        theta=0.0,  # Trimado para hover
-        u=0.0,  # Estacionario
-        v=0.0,
-        w=0.0
+    import matplotlib
+    matplotlib.use("Agg")
+
+    cfg = get_aircraft_config()
+    dyn = Dynamics6DOF(cfg)
+
+    print("=" * 60)
+    print(" DYNAMICS 6DOF -- TEST: VUELO RECTO Y NIVELADO 10 s")
+    print("=" * 60)
+
+    # Trim aproximado en crucero
+    V0    = cfg.V_cruise
+    alpha0 = np.radians(3.5)
+
+    x0 = State(
+        u=V0 * np.cos(alpha0),
+        w=V0 * np.sin(alpha0),
+        theta=alpha0,
     )
-    
-    # Control: hover constante
-    def hover_control(t: float, state: AircraftState) -> ControlInput:
-        return ControlInput(
-            throttle_vertical=0.75,  # Enough to hover + margen
-            throttle_horizontal=0.0,
-            mode="HOVER"
-        )
-    
-    # Simular 10 segundos
-    print("Simulando 10 segundos en HOVER...")
-    states, times = engine.simulate(initial_state, hover_control, t_end=10.0, dt=0.1)
-    
-    # Estadísticas
-    final_state = states[-1]
-    print(f"\nResultados finales:")
-    print(f"  Posición: z = {-final_state.z:.2f} m (profundidad)")
-    print(f"  Velocidad: u={final_state.u:.3f}, v={final_state.v:.3f}, w={final_state.w:.3f} m/s")
-    print(f"  Actitud: φ={np.degrees(final_state.phi):.2f}°, θ={np.degrees(final_state.theta):.2f}°, ψ={np.degrees(final_state.psi):.2f}°")
-    print(f"  Vel. Angular: p={final_state.p:.4f}, q={final_state.q:.4f}, r={final_state.r:.4f} rad/s")
-    
-    print("\n✓ Simulación completada")
+
+    def cruise_ctrl(t: float, s: State) -> Controls:
+        # Proporciona empuje para equilibrar arrastre (~= 10-12% empuje)
+        return Controls(throttle=0.45, delta_e=np.radians(-1.0))
+
+    states, times = dyn.simulate(x0, cruise_ctrl, t_end=10.0, dt=0.02)
+
+    s_final = states[-1]
+    print(f"Estado final (t={times[-1]:.1f} s):")
+    print(f"  u={s_final.u:.3f} m/s  w={s_final.w:.3f} m/s  V={s_final.V:.3f} m/s")
+    print(f"  theta={np.degrees(s_final.theta):.2f}°  alpha={np.degrees(s_final.alpha):.2f}°")
+    print(f"  Altitud: {s_final.altitude:.2f} m  (Deltaz desde inicio)")
+    print("\n[OK] dynamics_6dof.py OK")

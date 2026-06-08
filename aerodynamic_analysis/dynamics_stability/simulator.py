@@ -1,431 +1,343 @@
 """
 ================================================================================
-SIMULADOR PRINCIPAL VTOL - ESCENARIOS DE VUELO
+SIMULADOR NUMÉRICO -- RESPUESTA A PERTURBACIONES
 ================================================================================
-Ejecuta simulaciones completas del VTOL bajo diferentes escenarios:
+Integra las ecuaciones 6 DOF (RK4) para tres escenarios de validación:
 
-1. HOVER: Vuelo estacionario con perturbaciones
-2. TRANSICIÓN: Cambio de hover a crucero
-3. CRUCERO: Vuelo de ala fija
-4. RECUPERACIÓN: Respuesta ante perturbaciones (gust, control input)
+  1. Escalón de elevador  ->  excita Short Period + Phugoid
+  2. Perturbación en beta    ->  excita Dutch Roll + Spiral
+  3. Pulso de alerón      ->  excita Roll Mode
 
-Genera reportes con:
-- Trayectorias de estado
-- Análisis de estabilidad
-- Métricas de desempeño
+Para cada escenario se genera una gráfica en plots/ que compara la
+respuesta simulada con los modos analíticos (envolvente exponencial).
+
+Dependencias: numpy, matplotlib
+================================================================================
 """
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")   # backend sin ventana -- compatible con scripts batch
 import matplotlib.pyplot as plt
-from typing import Callable, Tuple, List
-from parameters import get_default_vtol_parameters, AircraftState, ControlInput
-from dynamics_6dof import VTOLDynamicsEngine
-from stability_analysis import StabilityAnalyzer, print_stability_report
-from forces_moments import AerodynamicCalculator
+from pathlib import Path
+from typing import List, Tuple
+
+from parameters import AircraftConfig, get_aircraft_config
+from dynamics_6dof import Dynamics6DOF, State, Controls
+from stability_analysis import StabilityAnalyzer, phugoid_analytic
+
+_PLOTS = Path(__file__).parent / "plots"
 
 
 # ============================================================================
-# ESCENARIOS DE SIMULACIÓN
+# FUNCIONES DE AYUDA
 # ============================================================================
 
-class HoverScenario:
-    """Simulación de hover: estacionario con perturbación."""
-    
-    def __init__(self, engine: VTOLDynamicsEngine):
-        self.engine = engine
-    
-    def control_law(self, t: float, state: AircraftState) -> ControlInput:
-        """
-        Control simple PID para mantener hover.
-        
-        En tiempo real (si existiera FC), esto sería un controlador embarcado.
-        """
-        # Feedback simplificado
-        throttle = 0.75  # Aproximado para equilibrio
-        
-        # Control de actitud (pitch/roll)
-        delta_e = -state.q * 0.1  # Amortiguamiento pitch
-        delta_a = -state.p * 0.1  # Amortiguamiento roll
-        
-        return ControlInput(
-            throttle_vertical=throttle,
-            throttle_horizontal=0.0,
-            delta_e=delta_e,
-            delta_a=delta_a,
-            mode="HOVER"
-        )
-    
-    def run(self, t_end: float = 30.0) -> Tuple[List[AircraftState], np.ndarray]:
-        """Ejecuta simulación."""
-        # Perturbación inicial: pequeño pitch
-        initial_state = AircraftState(
-            z=0.0,
-            theta=np.radians(5.0),  # 5° pitch
-            u=0.1,  # Pequeña velocidad forward
-        )
-        
-        states, times = self.engine.simulate(
-            initial_state,
-            self.control_law,
-            t_end=t_end,
-            dt=0.05
-        )
-        
-        return states, times
-
-
-class TransitionScenario:
-    """Simulación de transición: hover → crucero."""
-    
-    def __init__(self, engine: VTOLDynamicsEngine):
-        self.engine = engine
-        self.params = engine.params
-    
-    def control_law(self, t: float, state: AircraftState) -> ControlInput:
-        """
-        Control de transición: programa de empujes en función del tiempo.
-        
-        t ∈ [0, 1]: Fases de transición
-          - [0, 0.5): Acelerar manteniendo hover
-          - [0.5, 1.0): Pitch up progresivo
-          - [1.0, ∞): Crucero
-        """
-        t_trans = 5.0  # Duración transición (s)
-        phase = np.clip(t / t_trans, 0, 1)
-        
-        if phase < 0.5:
-            # Aceleración horizontal inicial
-            throttle_h = phase * 0.6
-            throttle_v = 0.75
-            theta_cmd = 0.0
-        else:
-            # Pitch up y transición a ala fija
-            throttle_h = 0.3 + (phase - 0.5) * 0.4
-            throttle_v = 0.75 * (1 - (phase - 0.5))
-            theta_cmd = (phase - 0.5) * np.radians(15)
-        
-        # Control
-        delta_e = theta_cmd - state.theta
-        
-        return ControlInput(
-            throttle_vertical=throttle_v,
-            throttle_horizontal=throttle_h,
-            delta_e=delta_e,
-            mode="TRANSITION"
-        )
-    
-    def run(self, t_end: float = 15.0) -> Tuple[List[AircraftState], np.ndarray]:
-        initial_state = AircraftState(z=0.0)
-        
-        states, times = self.engine.simulate(
-            initial_state,
-            self.control_law,
-            t_end=t_end,
-            dt=0.05
-        )
-        
-        return states, times
-
-
-class CruiseScenario:
-    """Simulación en crucero estable."""
-    
-    def __init__(self, engine: VTOLDynamicsEngine):
-        self.engine = engine
-        self.params = engine.params
-    
-    def control_law(self, t: float, state: AircraftState) -> ControlInput:
-        """Control simple de crucero."""
-        V_cruise = self.params.flight.v_cruise_ms
-        
-        # Trim aproximado
-        theta_trim = np.radians(3.0)
-        throttle_trim = 0.6
-        
-        # Control PID
-        error_v = (V_cruise - state.u)
-        throttle = throttle_trim + error_v * 0.1
-        
-        delta_e = (theta_trim - state.theta) - state.q * 0.05
-        
-        return ControlInput(
-            throttle_vertical=0.1,
-            throttle_horizontal=np.clip(throttle, 0, 1),
-            delta_e=delta_e,
-            mode="CRUISE"
-        )
-    
-    def run(self, t_end: float = 30.0) -> Tuple[List[AircraftState], np.ndarray]:
-        # Estado inicial: en crucero
-        V_cruise = self.params.flight.v_cruise_ms
-        
-        initial_state = AircraftState(
-            u=V_cruise,
-            theta=np.radians(3.0),
-            w=V_cruise * np.tan(np.radians(3.0))
-        )
-        
-        states, times = self.engine.simulate(
-            initial_state,
-            self.control_law,
-            t_end=t_end,
-            dt=0.05
-        )
-        
-        return states, times
-
-
-class GustRecoveryScenario:
-    """Respuesta ante ráfaga de viento (perturbación aerodinámicos)."""
-    
-    def __init__(self, engine: VTOLDynamicsEngine):
-        self.engine = engine
-    
-    def control_law(self, t: float, state: AircraftState) -> ControlInput:
-        """Control con autopiloto básico."""
-        V_cruise = self.engine.params.flight.v_cruise_ms
-        
-        # Ráfaga en t=5s
-        if 5.0 < t < 5.5:
-            # Simular como cambio en velocidad (simplificado)
-            pass
-        
-        throttle = 0.6 + (V_cruise - state.u) * 0.1
-        delta_e = -state.theta - state.q * 0.1
-        
-        return ControlInput(
-            throttle_vertical=0.1,
-            throttle_horizontal=np.clip(throttle, 0, 1),
-            delta_e=delta_e,
-            mode="CRUISE"
-        )
-    
-    def run(self, t_end: float = 20.0) -> Tuple[List[AircraftState], np.ndarray]:
-        V_cruise = self.engine.params.flight.v_cruise_ms
-        
-        initial_state = AircraftState(
-            u=V_cruise,
-            theta=np.radians(3.0),
-            w=V_cruise * np.tan(np.radians(3.0))
-        )
-        
-        states, times = self.engine.simulate(
-            initial_state,
-            self.control_law,
-            t_end=t_end,
-            dt=0.05
-        )
-        
-        return states, times
-
-
-# ============================================================================
-# ANÁLISIS Y REPORTE
-# ============================================================================
-
-def extract_time_series(states: List[AircraftState], times: np.ndarray) -> dict:
-    """Extrae series temporales de todas las variables."""
-    
-    n = len(states)
-    
-    data = {
-        'time': times,
-        # Posición
-        'x': np.array([s.x for s in states]),
-        'y': np.array([s.y for s in states]),
-        'z': np.array([s.z for s in states]),
-        # Velocidad body
-        'u': np.array([s.u for s in states]),
-        'v': np.array([s.v for s in states]),
-        'w': np.array([s.w for s in states]),
-        # Actitud
-        'phi': np.array([s.phi for s in states]),
-        'theta': np.array([s.theta for s in states]),
-        'psi': np.array([s.psi for s in states]),
-        # Vel. Angular
-        'p': np.array([s.p for s in states]),
-        'q': np.array([s.q for s in states]),
-        'r': np.array([s.r for s in states]),
+def _extract(states: List[State], times: np.ndarray) -> dict:
+    """Extrae series temporales de la lista de estados."""
+    return {
+        "t":     times,
+        "u":     np.array([s.u     for s in states]),
+        "v":     np.array([s.v     for s in states]),
+        "w":     np.array([s.w     for s in states]),
+        "p":     np.array([s.p     for s in states]),
+        "q":     np.array([s.q     for s in states]),
+        "r":     np.array([s.r     for s in states]),
+        "phi":   np.array([s.phi   for s in states]),
+        "theta": np.array([s.theta for s in states]),
+        "psi":   np.array([s.psi   for s in states]),
+        "V":     np.array([s.V     for s in states]),
+        "alpha": np.array([s.alpha for s in states]),
+        "beta":  np.array([s.beta  for s in states]),
+        "alt":   np.array([s.altitude for s in states]),
     }
-    
-    # Velocidad aerodinámica
-    data['V_airspeed'] = np.sqrt(data['u']**2 + data['v']**2 + data['w']**2)
-    
-    # Ángulos aerodinámicos (aproximado)
-    data['alpha'] = np.arctan2(data['w'], data['u'])
-    data['beta'] = np.arcsin(np.clip(data['v'] / data['V_airspeed'], -1, 1))
-    
-    return data
 
 
-def plot_results(data: dict, scenario_name: str = ""):
-    """Grafica resultados de simulación."""
-    
-    fig, axes = plt.subplots(4, 3, figsize=(14, 12))
-    fig.suptitle(f"VTOL Simulation - {scenario_name}", fontsize=14, fontweight='bold')
-    
-    time = data['time']
-    
-    # Fila 1: Posición
-    axes[0, 0].plot(time, data['x'], 'b-')
-    axes[0, 0].set_ylabel('X (m)')
+def _trim_state(cfg: AircraftConfig) -> State:
+    """Estado trimado en crucero."""
+    from stability_analysis import StaticStability
+    trim = StaticStability(cfg).trim_cruise()
+    alpha_t = trim["alpha_trim_rad"]
+    V0      = cfg.V_cruise
+    return State(
+        u     = V0 * np.cos(alpha_t),
+        w     = V0 * np.sin(alpha_t),
+        theta = alpha_t,
+    )
+
+
+def _trim_throttle(cfg: AircraftConfig) -> float:
+    """Throttle de trim para equilibrar arrastre."""
+    from stability_analysis import StaticStability
+    trim = StaticStability(cfg).trim_throttle_frac() if hasattr(
+        StaticStability(cfg), "trim_throttle_frac") else None
+    if trim is None:
+        st = StaticStability(cfg).trim_cruise()
+        T  = st["T_trim_N"]
+        return np.clip(T / cfg.prop.T_max_pusher, 0.0, 1.0)
+    return trim
+
+
+# ============================================================================
+# ESCENARIO 1 -- ESCALÓN DE ELEVADOR (Short Period + Phugoid)
+# ============================================================================
+
+def scenario_elevator_step(
+    cfg: AircraftConfig,
+    dyn: Dynamics6DOF,
+    de_step: float = np.radians(5.0),
+    t_end:   float = 120.0,
+    dt:      float = 0.05,
+) -> dict:
+    """
+    Respuesta a escalón de elevador de +5° aplicado en t=2 s.
+
+    Parámetros elegidos para ver ambos modos:
+      Short Period: transitorio rápido en los primeros ~5 s
+      Phugoid:      oscilación lenta visible en V y theta en t > 10 s
+    """
+    x0       = _trim_state(cfg)
+    th_trim  = _trim_throttle(cfg)
+    de_trim  = StaticStability_trim_de(cfg)
+
+    def ctrl(t: float, s: State) -> Controls:
+        de = de_trim + (de_step if t >= 2.0 else 0.0)
+        return Controls(
+            delta_e  = de,
+            throttle = th_trim,
+        )
+
+    states, times = dyn.simulate(x0, ctrl, t_end=t_end, dt=dt)
+    return _extract(states, times)
+
+
+def StaticStability_trim_de(cfg):
+    from stability_analysis import StaticStability
+    return StaticStability(cfg).trim_cruise()["delta_e_trim_rad"]
+
+
+# ============================================================================
+# ESCENARIO 2 -- PERTURBACIÓN EN beta (Dutch Roll + Spiral)
+# ============================================================================
+
+def scenario_beta_perturbation(
+    cfg: AircraftConfig,
+    dyn: Dynamics6DOF,
+    beta0:  float = np.radians(5.0),
+    t_end:  float = 60.0,
+    dt:     float = 0.02,
+) -> dict:
+    """
+    Respuesta a perturbación inicial en ángulo de resbalamiento beta=+5°.
+
+    Excita los modos laterales: Dutch Roll (oscilatorio en beta, _, r)
+    y Spiral (divergencia lenta en _ si es inestable).
+    """
+    x0_trim = _trim_state(cfg)
+    th_trim = _trim_throttle(cfg)
+    de_trim = StaticStability_trim_de(cfg)
+
+    # Perturbación: v != 0 -> beta = arcsin(v/V)
+    V0  = cfg.V_cruise
+    x0  = State(
+        u     = x0_trim.u,
+        v     = V0 * np.sin(beta0),
+        w     = x0_trim.w,
+        theta = x0_trim.theta,
+    )
+
+    def ctrl(t: float, s: State) -> Controls:
+        return Controls(delta_e=de_trim, throttle=th_trim)
+
+    states, times = dyn.simulate(x0, ctrl, t_end=t_end, dt=dt)
+    return _extract(states, times)
+
+
+# ============================================================================
+# ESCENARIO 3 -- PULSO DE ALERÓN (Roll Mode)
+# ============================================================================
+
+def scenario_aileron_pulse(
+    cfg: AircraftConfig,
+    dyn: Dynamics6DOF,
+    da_pulse: float = np.radians(10.0),
+    t_pulse:  float = 0.5,
+    t_end:    float = 20.0,
+    dt:       float = 0.02,
+) -> dict:
+    """
+    Pulso de alerón de +10° durante 0.5 s, luego neutro.
+
+    Excita el Roll Mode (decaimiento exponencial de p).
+    """
+    x0      = _trim_state(cfg)
+    th_trim = _trim_throttle(cfg)
+    de_trim = StaticStability_trim_de(cfg)
+
+    def ctrl(t: float, s: State) -> Controls:
+        da = da_pulse if t <= t_pulse else 0.0
+        return Controls(delta_e=de_trim, delta_a=da, throttle=th_trim)
+
+    states, times = dyn.simulate(x0, ctrl, t_end=t_end, dt=dt)
+    return _extract(states, times)
+
+
+# ============================================================================
+# GRÁFICAS DE VALIDACIÓN
+# ============================================================================
+
+def plot_elevator_step(data: dict, results: dict, filename: str = "elevator_step.png"):
+    """Gráfica escalón elevador: V(t), alpha(t), theta(t), q(t)."""
+    _PLOTS.mkdir(exist_ok=True)
+    t = data["t"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle("Respuesta Escalón Elevador (+5°)  --  Short Period + Phugoid",
+                 fontweight="bold")
+
+    axes[0, 0].plot(t, data["V"],               "b-", lw=1.5)
+    axes[0, 0].axhline(data["V"][0], ls="--",  color="k", alpha=0.4)
+    axes[0, 0].set_ylabel("V [m/s]")
+    axes[0, 0].set_xlabel("t [s]")
     axes[0, 0].grid(True, alpha=0.3)
-    
-    axes[0, 1].plot(time, data['y'], 'g-')
-    axes[0, 1].set_ylabel('Y (m)')
+    axes[0, 0].set_title("Velocidad aerodinámica")
+
+    axes[0, 1].plot(t, np.degrees(data["alpha"]), "r-", lw=1.5)
+    axes[0, 1].set_ylabel("alpha [°]")
+    axes[0, 1].set_xlabel("t [s]")
     axes[0, 1].grid(True, alpha=0.3)
-    
-    axes[0, 2].plot(time, -data['z'], 'r-')  # Altura = -z
-    axes[0, 2].set_ylabel('Altura (m)')
-    axes[0, 2].grid(True, alpha=0.3)
-    
-    # Fila 2: Velocidad
-    axes[1, 0].plot(time, data['u'], 'b-', label='u')
-    axes[1, 0].plot(time, data['v'], 'g-', label='v')
-    axes[1, 0].plot(time, data['w'], 'r-', label='w')
-    axes[1, 0].set_ylabel('Velocidad (m/s)')
-    axes[1, 0].legend()
+    axes[0, 1].set_title("Ángulo de ataque")
+
+    axes[1, 0].plot(t, np.degrees(data["theta"]), "g-", lw=1.5)
+    axes[1, 0].set_ylabel("theta [°]")
+    axes[1, 0].set_xlabel("t [s]")
     axes[1, 0].grid(True, alpha=0.3)
-    
-    axes[1, 1].plot(time, data['V_airspeed'], 'k-')
-    axes[1, 1].set_ylabel('V airspeed (m/s)')
+    axes[1, 0].set_title("Ángulo de pitch")
+
+    axes[1, 1].plot(t, np.degrees(data["q"]),    "m-", lw=1.5)
+    axes[1, 1].set_ylabel("q [°/s]")
+    axes[1, 1].set_xlabel("t [s]")
     axes[1, 1].grid(True, alpha=0.3)
-    
-    axes[1, 2].plot(time, np.degrees(data['alpha']), 'b-', label='α')
-    axes[1, 2].plot(time, np.degrees(data['beta']), 'g-', label='β')
-    axes[1, 2].set_ylabel('Ángulos aero (°)')
-    axes[1, 2].legend()
-    axes[1, 2].grid(True, alpha=0.3)
-    
-    # Fila 3: Actitud
-    axes[2, 0].plot(time, np.degrees(data['phi']), 'b-')
-    axes[2, 0].set_ylabel('Roll φ (°)')
-    axes[2, 0].grid(True, alpha=0.3)
-    
-    axes[2, 1].plot(time, np.degrees(data['theta']), 'g-')
-    axes[2, 1].set_ylabel('Pitch θ (°)')
-    axes[2, 1].grid(True, alpha=0.3)
-    
-    axes[2, 2].plot(time, np.degrees(data['psi']), 'r-')
-    axes[2, 2].set_ylabel('Yaw ψ (°)')
-    axes[2, 2].grid(True, alpha=0.3)
-    
-    # Fila 4: Vel. Angular
-    axes[3, 0].plot(time, data['p'], 'b-')
-    axes[3, 0].set_ylabel('p (rad/s)')
-    axes[3, 0].set_xlabel('Time (s)')
-    axes[3, 0].grid(True, alpha=0.3)
-    
-    axes[3, 1].plot(time, data['q'], 'g-')
-    axes[3, 1].set_ylabel('q (rad/s)')
-    axes[3, 1].set_xlabel('Time (s)')
-    axes[3, 1].grid(True, alpha=0.3)
-    
-    axes[3, 2].plot(time, data['r'], 'r-')
-    axes[3, 2].set_ylabel('r (rad/s)')
-    axes[3, 2].set_xlabel('Time (s)')
-    axes[3, 2].grid(True, alpha=0.3)
-    
+    axes[1, 1].set_title("Velocidad angular de pitch")
+
+    # Superponer envolvente analítica del Phugoid si disponible
+    ph = results.get("phugoid_analytic")
+    if ph and np.isfinite(ph["period_s"]):
+        zeta = ph["zeta"]; wn = ph["omega_n"]
+        t_ph = np.linspace(0, t[-1], 500)
+        A_ph = abs(data["V"][-1] - data["V"][0]) * 0.5
+        env  = data["V"][0] + A_ph * np.exp(-zeta * wn * t_ph) * np.cos(
+            wn * np.sqrt(max(1 - zeta**2, 0.0)) * t_ph)
+        axes[0, 0].plot(t_ph, env, "k--", alpha=0.6, label=f"Phugoid analítico\nT={ph['period_s']:.1f}s")
+        axes[0, 0].legend(fontsize=8)
+
     plt.tight_layout()
-    return fig
+    fig.savefig(str(_PLOTS / filename), dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Guardado: {_PLOTS / filename}")
+
+
+def plot_beta_perturbation(data: dict, filename: str = "beta_perturbation.png"):
+    """Gráfica perturbación beta: beta(t), _(t), r(t), p(t)."""
+    _PLOTS.mkdir(exist_ok=True)
+    t = data["t"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle("Perturbación beta=+5°  --  Dutch Roll + Spiral", fontweight="bold")
+
+    pairs = [
+        (axes[0, 0], np.degrees(data["beta"]),  "beta [°]",    "Ángulo de resbalamiento"),
+        (axes[0, 1], np.degrees(data["phi"]),   "_ [°]",    "Ángulo de roll"),
+        (axes[1, 0], np.degrees(data["r"]),     "r [°/s]",  "Yaw rate"),
+        (axes[1, 1], np.degrees(data["p"]),     "p [°/s]",  "Roll rate"),
+    ]
+    colors = ["b", "r", "g", "m"]
+    for (ax, y, ylabel, title), c in zip(pairs, colors):
+        ax.plot(t, y, color=c, lw=1.5)
+        ax.axhline(0.0, ls="--", color="k", alpha=0.3)
+        ax.set_ylabel(ylabel); ax.set_xlabel("t [s]")
+        ax.grid(True, alpha=0.3); ax.set_title(title)
+
+    plt.tight_layout()
+    fig.savefig(str(_PLOTS / filename), dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Guardado: {_PLOTS / filename}")
+
+
+def plot_aileron_pulse(data: dict, results: dict, filename: str = "aileron_pulse.png"):
+    """Gráfica pulso alerón: p(t), _(t) con envolvente del Roll Mode."""
+    _PLOTS.mkdir(exist_ok=True)
+    t = data["t"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+    fig.suptitle("Pulso Alerón +10° (0.5 s)  --  Roll Mode", fontweight="bold")
+
+    axes[0].plot(t, np.degrees(data["p"]),   "b-", lw=1.5, label="p simulado")
+    axes[1].plot(t, np.degrees(data["phi"]), "r-", lw=1.5, label="_ simulado")
+
+    # Envolvente Roll Mode: p(t) ~ p_max * exp(lambda_roll * t)
+    lm = results.get("lat_modes", {})
+    rm = lm.get("roll_mode")
+    if rm and np.isfinite(rm.get("sigma", np.nan)):
+        sigma_r = rm["sigma"]
+        tau_r   = rm.get("tau_s", 1.0 / abs(sigma_r) if abs(sigma_r) > 1e-6 else np.inf)
+        t_env   = np.linspace(0, t[-1], 400)
+        p_max   = np.max(np.abs(np.degrees(data["p"][:50])))  # pico inicial
+        env_p   = p_max * np.exp(sigma_r * t_env)
+        axes[0].plot(t_env, env_p,  "k--", alpha=0.6,
+                     label=f"Roll mode tau={tau_r:.2f}s")
+        axes[0].plot(t_env, -env_p, "k--", alpha=0.6)
+
+    for ax, lbl in zip(axes, ["p [°/s]", "_ [°]"]):
+        ax.axhline(0, ls="--", color="k", alpha=0.3)
+        ax.set_xlabel("t [s]"); ax.set_ylabel(lbl)
+        ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    fig.savefig(str(_PLOTS / filename), dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Guardado: {_PLOTS / filename}")
 
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
-def main():
-    """Ejecuta suite completa de simulaciones."""
-    
-    print("\n" + "="*80)
-    print("CARIBE VTOL - SIMULADOR DE DINÁMICAS")
-    print("="*80)
-    
-    # Inicializar
-    params = get_default_vtol_parameters()
-    engine = VTOLDynamicsEngine(params)
-    analyzer = StabilityAnalyzer(params)
-    
-    # ========================================================================
-    # ANÁLISIS DE ESTABILIDAD INICIAL
-    # ========================================================================
-    print("\n1. ANÁLISIS DE ESTABILIDAD EN TRIM CONDITIONS")
-    print("-" * 80)
-    
-    eq_hover, ctrl_hover = analyzer.find_trim_hover()
-    analysis_hover = analyzer.analyze_stability(eq_hover, ctrl_hover)
-    print_stability_report(analysis_hover, "HOVER STABILITY")
-    
-    eq_cruise, ctrl_cruise = analyzer.find_trim_cruise()
-    analysis_cruise = analyzer.analyze_stability(eq_cruise, ctrl_cruise)
-    print_stability_report(analysis_cruise, "CRUISE STABILITY")
-    
-    # ========================================================================
-    # SIMULACIONES
-    # ========================================================================
-    print("\n2. EJECUTANDO SIMULACIONES DE VUELO")
-    print("-" * 80)
-    
-    scenarios = [
-        ("HOVER", HoverScenario(engine), 30.0),
-        ("TRANSITION", TransitionScenario(engine), 15.0),
-        ("CRUISE", CruiseScenario(engine), 30.0),
-    ]
-    
-    results = {}
-    
-    for name, scenario, t_end in scenarios:
-        print(f"\n  Simulando: {name} ({t_end}s)...", end=' ', flush=True)
-        states, times = scenario.run(t_end=t_end)
-        data = extract_time_series(states, times)
-        results[name] = data
-        print("✓")
-    
-    # ========================================================================
-    # GRÁFICAS
-    # ========================================================================
-    print("\n3. GENERANDO GRÁFICAS")
-    print("-" * 80)
-    
-    for name, data in results.items():
-        print(f"  {name}...", end=' ', flush=True)
-        fig = plot_results(data, scenario_name=name)
-        plt.savefig(f"/home/claude/caribe-vtol-aerodynamic-analysis/{name.lower()}_results.png",
-                   dpi=100, bbox_inches='tight')
-        plt.close(fig)
-        print("✓")
-    
-    # ========================================================================
-    # MÉTRICAS DE DESEMPEÑO
-    # ========================================================================
-    print("\n4. MÉTRICAS DE DESEMPEÑO")
-    print("-" * 80)
-    
-    for name, data in results.items():
-        print(f"\n  {name}:")
-        print(f"    Altura máxima: {-np.min(data['z']):.2f} m")
-        print(f"    Velocidad máx: {np.max(data['V_airspeed']):.2f} m/s")
-        print(f"    Ángulo pitch máx: {np.max(np.abs(np.degrees(data['theta']))):.2f}°")
-        print(f"    Oscilación residual (final 5s):")
-        
-        t_final = data['time'][-1]
-        idx_final = data['time'] >= (t_final - 5.0)
-        
-        theta_std = np.std(data['theta'][idx_final])
-        q_std = np.std(data['q'][idx_final])
-        
-        print(f"      θ std: {np.degrees(theta_std):.3f}°")
-        print(f"      q std: {q_std:.6f} rad/s")
-    
-    print("\n" + "="*80)
-    print("✓ SIMULACIÓN COMPLETADA")
-    print("="*80)
-    print("\nArchivos generados:")
-    print("  - hover_results.png")
-    print("  - transition_results.png")
-    print("  - cruise_results.png")
-    print("\n")
-
-
 if __name__ == "__main__":
-    main()
+    print("=" * 64)
+    print(" SIMULADOR VTOL -- ESCENARIOS DE PERTURBACIÓN")
+    print("=" * 64)
+
+    cfg      = get_aircraft_config()
+    dyn      = Dynamics6DOF(cfg)
+    analyzer = StabilityAnalyzer(cfg)
+    results  = analyzer.run()
+
+    from stability_analysis import print_stability_report
+    print_stability_report(results)
+
+    print("\nEjecutando escenarios de simulación...")
+
+    # 1) Escalón de elevador
+    print("\n  [1/3] Escalón de elevador (+5°, 120 s)...", end=" ", flush=True)
+    data_elev = scenario_elevator_step(cfg, dyn)
+    plot_elevator_step(data_elev, results)
+    print("OK")
+
+    # 2) Perturbación beta
+    print("  [2/3] Perturbación beta=+5° (60 s)...",  end=" ", flush=True)
+    data_beta = scenario_beta_perturbation(cfg, dyn)
+    plot_beta_perturbation(data_beta)
+    print("OK")
+
+    # 3) Pulso de alerón
+    print("  [3/3] Pulso alerón +10° (20 s)...",   end=" ", flush=True)
+    data_ail  = scenario_aileron_pulse(cfg, dyn)
+    plot_aileron_pulse(data_ail, results)
+    print("OK")
+
+    print(f"\nGráficas generadas en: {_PLOTS}/")
+    print("  - elevator_step.png")
+    print("  - beta_perturbation.png")
+    print("  - aileron_pulse.png")
+    print("\n[OK] simulator.py OK")

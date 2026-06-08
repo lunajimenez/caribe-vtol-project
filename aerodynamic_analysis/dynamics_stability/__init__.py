@@ -1,99 +1,116 @@
 """
 ================================================================================
-CARIBE VTOL - AERODYNAMIC ANALYSIS PACKAGE
+CARIBE VTOL -- MÓDULO DE DINÁMICA Y ESTABILIDAD
 ================================================================================
-Suite completa de análisis de dinámicas y estabilidad para el prototipo VTOL
-de la Universidad Tecnológica de Bolívar.
+Suite completa de análisis dinámico para el VTOL QuadPlane 4+1 pusher.
+Universidad Tecnológica de Bolívar -- Ingeniería Mecatrónica.
 
 Módulos:
-  - parameters: Definición de parámetros geométricos, másicos y aerodinámicos
-  - forces_moments: Cálculo de fuerzas y momentos (aerodinámicos + propulsión)
-  - dynamics_6dof: Motor de dinámicas 6 DOF con integrador RK45
-  - stability_analysis: Análisis de estabilidad (eigenanalysis, trim)
-  - simulator: Simulador completo con escenarios de vuelo
+  parameters      -- Parámetros geométricos, másicos y aerodinámicos (dataclasses)
+  xflr5_loader    -- Carga y procesamiento de polares XFLR5 + regresión lineal
+  forces_moments  -- Fuerzas y momentos en body frame (ala + cola + gravedad + empuje)
+  dynamics_6dof   -- Ecuaciones 6DOF + integrador RK4
+  stability_analysis -- Estabilidad estática y dinámica (5 modos)
+  simulator       -- Escenarios de perturbación y gráficas de validación
+  simulink_export -- Exporta parámetros y matrices a MATLAB/Simulink (.m)
 
-Uso básico:
-  >>> from aerodynamic_analysis import get_default_vtol_parameters
-  >>> from aerodynamic_analysis import VTOLDynamicsEngine, StabilityAnalyzer
-  >>> 
-  >>> params = get_default_vtol_parameters()
-  >>> engine = VTOLDynamicsEngine(params)
-  >>> analyzer = StabilityAnalyzer(params)
-
-Referencia:
-  - Bryan, G.H. (1911). "Stability in Aviation"
-  - Abzug & Larrabee (2005). "Airplane Stability and Control", 2nd Ed.
-  - Nelson, R.C. (1998). "Flight Stability and Automatic Control", 2nd Ed.
-  - Etkin & Reid (1996). "Dynamics of Atmospheric Flight"
-
+Uso rápido:
+  >>> from aerodynamic_analysis.dynamics_stability import get_aircraft_config
+  >>> from aerodynamic_analysis.dynamics_stability import StabilityAnalyzer
+  >>> cfg = get_aircraft_config()
+  >>> results = StabilityAnalyzer(cfg).run()
 ================================================================================
 """
 
-from parameters import (
-    AircraftGeometry,
-    InertiaProperties,
-    AerodynamicCoefficients,
-    FlightConditions,
+from .parameters import (
+    Atmosphere,
+    MassProperties,
+    WingGeometry,
+    HTailGeometry,
+    VTailGeometry,
+    AileronGeometry,
+    AeroDerivatives,
     PropulsionSystem,
-    VTOLModeParameters,
-    VTOLAircraftParameters,
+    AircraftConfig,
+    get_aircraft_config,
     get_default_vtol_parameters,
 )
 
-from forces_moments import (
-    AerodynamicCalculator,
-    ThrustCalculator,
+from .xflr5_loader import (
+    Polar3D,
+    Polar2D,
+    LinearDerivatives,
+    DragPolarFit,
+    AeroTableWing,
+    AeroTableTail,
+    load_all_data,
+    compute_linear_derivatives,
+    compute_drag_polar,
+    verify_velocity_independence,
 )
 
-from dynamics_6dof import (
-    AircraftState,
-    ControlInput,
-    VTOLDynamicsEngine,
+from .forces_moments import (
+    AeroModel,
+    PropModel,
+    airspeed_angles,
 )
 
-from stability_analysis import (
+from .dynamics_6dof import (
+    State,
+    Controls,
+    Dynamics6DOF,
+    euler_dcm,
+    numerical_jacobian,
+)
+
+from .stability_analysis import (
+    StaticStability,
+    DynamicLinearization,
     StabilityAnalyzer,
+    analyze_longitudinal,
+    analyze_lateral,
+    phugoid_analytic,
     print_stability_report,
 )
 
-from simulator import (
-    HoverScenario,
-    TransitionScenario,
-    CruiseScenario,
-    GustRecoveryScenario,
-    extract_time_series,
-    plot_results,
+from .simulator import (
+    scenario_elevator_step,
+    scenario_beta_perturbation,
+    scenario_aileron_pulse,
+    plot_elevator_step,
+    plot_beta_perturbation,
+    plot_aileron_pulse,
 )
 
-__version__ = "1.0.0"
-__author__ = "Universidad Tecnológica de Bolívar - Ingeniería Mecatrónica"
-__date__ = "2025-03-13"
+from .simulink_export import export_simulink
+
+__version__ = "2.0.0"
+__author__  = "Universidad Tecnológica de Bolívar -- Ingeniería Mecatrónica"
+__date__    = "2026-05-29"
 
 __all__ = [
-    # Parameters
-    "AircraftGeometry",
-    "InertiaProperties",
-    "AerodynamicCoefficients",
-    "FlightConditions",
-    "PropulsionSystem",
-    "VTOLModeParameters",
-    "VTOLAircraftParameters",
-    "get_default_vtol_parameters",
-    # Forces & Moments
-    "AerodynamicCalculator",
-    "ThrustCalculator",
-    # Dynamics
-    "AircraftState",
-    "ControlInput",
-    "VTOLDynamicsEngine",
-    # Stability
-    "StabilityAnalyzer",
-    "print_stability_report",
-    # Simulator
-    "HoverScenario",
-    "TransitionScenario",
-    "CruiseScenario",
-    "GustRecoveryScenario",
-    "extract_time_series",
-    "plot_results",
+    # parameters
+    "Atmosphere", "MassProperties", "WingGeometry", "HTailGeometry",
+    "VTailGeometry", "AileronGeometry", "AeroDerivatives",
+    "PropulsionSystem", "AircraftConfig",
+    "get_aircraft_config", "get_default_vtol_parameters",
+    # xflr5_loader
+    "Polar3D", "Polar2D", "LinearDerivatives", "DragPolarFit",
+    "AeroTableWing", "AeroTableTail",
+    "load_all_data", "compute_linear_derivatives",
+    "compute_drag_polar", "verify_velocity_independence",
+    # forces_moments
+    "AeroModel", "PropModel", "airspeed_angles",
+    # dynamics_6dof
+    "State", "Controls", "Dynamics6DOF", "euler_dcm", "numerical_jacobian",
+    # stability_analysis
+    "StaticStability", "DynamicLinearization", "StabilityAnalyzer",
+    "analyze_longitudinal", "analyze_lateral",
+    "phugoid_analytic", "print_stability_report",
+    # simulator
+    "scenario_elevator_step", "scenario_beta_perturbation",
+    "scenario_aileron_pulse",
+    "plot_elevator_step", "plot_beta_perturbation", "plot_aileron_pulse",
+    # simulink_export
+    "export_simulink",
 ]
