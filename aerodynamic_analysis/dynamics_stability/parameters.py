@@ -47,7 +47,7 @@ class MassProperties:
     Inercias marcadas [PROVISIONAL]: deben sustituirse con valores CAD NX
     una vez se cierre el diseño detallado de la estructura.
     """
-    m:   float = 8.5    # [kg] MTOW [CONFIRMED -- especificación de diseño]
+    m:   float = 10.0   # [kg] MTOW [CONFIRMED -- especificación de diseño]
     x_cg: float = 0.41  # [m] posición CG desde el morro [CONFIRMED -- sizing]
 
     # Momentos de inercia [PROVISIONAL -- estimados por fórmulas Roskam para UAVs]
@@ -322,7 +322,7 @@ class AircraftConfig:
         rho = self.atm.rho
         g   = self.atm.g
         self.V_cruise = 19.34   # [m/s] velocidad crucero [CONFIRMED]
-        self.V_stall  = 11.11   # [m/s] velocidad pérdida [CONFIRMED]
+        self.V_stall  = 12.05   # [m/s] velocidad pérdida [DERIVED: V_stall*sqrt(10/8.5)]
 
         # Presión dinámica en crucero
         self.q_cruise = 0.5 * rho * self.V_cruise**2   # [Pa] [DERIVED]

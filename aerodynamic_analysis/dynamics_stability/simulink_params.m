@@ -1,6 +1,6 @@
 %% simulink_params.m
 %% Generado automáticamente por simulink_export.py
-%% Fecha: 2026-06-07 23:02
+%% Fecha: 2026-06-11 13:39
 %% Proyecto: VTOL Caribe -- Universidad Tecnológica de Bolívar
 %%
 %% Uso:
@@ -20,7 +20,7 @@ fprintf('Cargando parámetros VTOL Caribe...\n');
 %% =========================================================================
 %% 1. MASA E INERCIAS
 %% =========================================================================
-mass_kg = 8.5;  % [kg] MTOW [CONFIRMED]
+mass_kg = 10;  % [kg] MTOW [CONFIRMED]
 Ixx = 0.35;  % [kg*m2] inercia roll [PROVISIONAL]
 Iyy = 0.45;  % [kg*m2] inercia pitch [PROVISIONAL]
 Izz = 0.7;  % [kg*m2] inercia yaw [PROVISIONAL]
@@ -62,14 +62,14 @@ CLq = 6.0175314;  % [/rad] lift due to q [DERIVED]
 V0 = 19.34;  % [m/s] velocidad crucero [CONFIRMED]
 rho = 1.225;  % [kg/m3] densidad ISA [CONFIRMED]
 g = 9.81;  % [m/s2]
-alpha0_deg = 3.9839962;  % [°] AoA trim [DERIVED]
-alpha0_rad = 0.069533851;  % [rad] AoA trim [DERIVED]
-de0_deg = -15.033016;  % [°] elevador trim [DERIVED]
-de0_rad = -0.26237563;  % [rad] elevador trim [DERIVED]
-CL0_trim = 0.64192729;  % [-] CL en trim [DERIVED]
-CD0_trim = 0.032023767;  % [-] CD en trim [DERIVED]
-LD_trim = 20.04534;  % [-] L/D en trim [DERIVED]
-T_trim = 4.1598197;  % [N] empuje de trim [DERIVED]
+alpha0_deg = 5.3950649;  % [°] AoA trim [DERIVED]
+alpha0_rad = 0.094161647;  % [rad] AoA trim [DERIVED]
+de0_deg = -18.5898;  % [°] elevador trim [DERIVED]
+de0_rad = -0.32445322;  % [rad] elevador trim [DERIVED]
+CL0_trim = 0.75520858;  % [-] CL en trim [DERIVED]
+CD0_trim = 0.03894639;  % [-] CD en trim [DERIVED]
+LD_trim = 19.390978;  % [-] L/D en trim [DERIVED]
+T_trim = 5.0590539;  % [N] empuje de trim [DERIVED]
 x_NP = 0.56115536;  % [m] punto neutro [DERIVED]
 SM_pct = 59.982286;  % [%MAC] margen estático [DERIVED]
 
@@ -90,37 +90,37 @@ IC_euler    = [phi0; theta0; psi0];
 %% =========================================================================
 %% Sistema longitudinal:  x_lon = [Deltau, Deltaw, Deltaq, Deltatheta]
 %%                        u_lon = [Deltadeltae]
-A_lon = [-0.02212507  +0.25484380  +0.00000000  -9.81000000;
-  -1.01447777  -4.49460125  +19.26951500  +0.00000000;
+A_lon = [-0.01880631  +0.25484380  +0.00000000  -9.81000000;
+  -1.01447777  -3.82041106  +19.28907459  +0.00000000;
   +0.00000000  -12.83279144  -8.94023860  +0.00000000;
   +0.00000000  +0.00000000  +1.00000000  +0.00000000];
 B_lon = [+0.00000000;
-  -6.59834117;
+  -5.60858999;
   -98.46191324;
   +0.00000000];
 
 %% Sistema lateral-direccional:  x_lat = [Deltabeta, Deltap, Deltar, Delta_]
 %%                               u_lat = [Deltadeltaa, Deltadeltar]
-A_lat = [-0.33187611  +0.00000000  -1.00000000  +0.50723888;
+A_lat = [-0.28209469  +0.00000000  -1.00000000  +0.50723888;
   -37.68153996  -24.45227460  +6.82574856  +0.00000000;
   +25.58924675  -3.09766095  -0.92966143  +0.00000000;
   +0.00000000  +1.00000000  +0.00000000  +0.00000000];
-B_lat = [+0.00000000  +0.07506721;
+B_lat = [+0.00000000  +0.06380713;
   +126.39500016  +16.36734637;
   +2.10088327  -24.67316393;
   +0.00000000  +0.00000000];
 
 %% Eigenvalores longitudinales
-eig_lon(1) = -6.723791 + 15.564075i;
-eig_lon(2) = -6.723791 + -15.564075i;
-eig_lon(3) = -0.004691 + 0.666537i;
-eig_lon(4) = -0.004691 + -0.666537i;
+eig_lon(1) = -6.386502 + 15.519772i;
+eig_lon(2) = -6.386502 + -15.519772i;
+eig_lon(3) = -0.003226 + 0.673373i;
+eig_lon(4) = -0.003226 + -0.673373i;
 
 %% Eigenvalores laterales
-eig_lat(1) = -23.816946 + 0.000000i;
-eig_lat(2) = -0.993641 + 5.648353i;
-eig_lat(3) = -0.993641 + -5.648353i;
-eig_lat(4) = 0.090415 + 0.000000i;
+eig_lat(1) = -23.816355 + 0.000000i;
+eig_lat(2) = -0.969177 + 5.644209i;
+eig_lat(3) = -0.969177 + -5.644209i;
+eig_lat(4) = 0.090679 + 0.000000i;
 
 %% =========================================================================
 %% 6. TABLAS DE LOOKUP CL(alpha), CD(alpha), Cm(alpha)
